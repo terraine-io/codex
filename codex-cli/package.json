@@ -28,6 +28,7 @@
   ],
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
+    "@types/ws": "^8.18.1",
     "chalk": "^5.2.0",
     "diff": "^7.0.0",
     "dotenv": "^16.1.4",
@@ -50,6 +51,7 @@
     "strip-ansi": "^7.1.0",
     "to-rotated": "^1.0.0",
     "use-interval": "1.4.0",
+    "ws": "^8.18.2",
     "zod": "^3.24.3"
   },
   "devDependencies": {
