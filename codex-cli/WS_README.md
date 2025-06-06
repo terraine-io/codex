@@ -29,6 +29,8 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
    ```bash
    export OPENAI_API_KEY="your-api-key-here"
    ```
+   
+   **Note**: The server will automatically check for this environment variable on startup and exit with an error if it's not set.
 
 3. Install WebSocket dependencies:
    ```bash
@@ -37,12 +39,14 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
 
 ### Running the Server
 
-1. **Using the convenience script (recommended):**
+1. **Using npm scripts (recommended):**
    ```bash
-   ./build-ws-server.sh
-   npm run start:ws --prefix=$TERRAINE_PROJECT_ROOT
+   # Build the server
+   node build-ws-server.mjs
+   
+   # Start the server
+   npm run start:ws
    ```
-   This script will automatically build the server if needed and start it.
 
 2. **Manual build and run:**
    ```bash

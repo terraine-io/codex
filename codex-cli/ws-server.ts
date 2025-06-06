@@ -8,6 +8,20 @@ import type { AppConfig } from './src/utils/config.js';
 import { ReviewDecision } from './src/utils/agent/review.js';
 import { randomUUID } from 'crypto';
 
+// Check for required environment variables on startup
+function checkEnvironment() {
+  if (!process.env.OPENAI_API_KEY) {
+    console.error('❌ Error: OPENAI_API_KEY environment variable is not set');
+    console.error('Please set your OpenAI API key:');
+    console.error('  export OPENAI_API_KEY="your-api-key-here"');
+    console.error('');
+    console.error('You can get an API key from: https://platform.openai.com/account/api-keys');
+    process.exit(1);
+  }
+  
+  console.log('✅ OPENAI_API_KEY is set');
+}
+
 // Message types for WebSocket communication
 interface WSMessage {
   id: string;
@@ -265,6 +279,9 @@ class WebSocketAgentServer {
     this.wss.close();
   }
 }
+
+// Check environment before starting server
+checkEnvironment();
 
 // Example usage
 const server = new WebSocketAgentServer(8080);
