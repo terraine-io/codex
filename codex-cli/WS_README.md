@@ -39,7 +39,8 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
 
 1. **Using the convenience script (recommended):**
    ```bash
-   ./run-ws-server.sh
+   ./build-ws-server.sh
+   npm run start:ws --prefix=$TERRAINE_PROJECT_ROOT
    ```
    This script will automatically build the server if needed and start it.
 

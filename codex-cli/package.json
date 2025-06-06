@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit",
     "build": "node build.mjs",
     "build:dev": "NODE_ENV=development node build.mjs --dev && NODE_OPTIONS=--enable-source-maps node dist/cli-dev.js",
+    "start:ws": "node dist/ws-server.js",
     "stage-release": "./scripts/stage_release.sh"
   },
   "files": [
