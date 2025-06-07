@@ -14,6 +14,8 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
 
 - `ws-server.ts` - Main WebSocket server implementation
 - `ws-client-example.js` - Example Node.js client demonstrating usage (ES module syntax)
+- `.env.example` - Example environment configuration file
+- `build-ws-server.mjs` - Build script for the WebSocket server
 - `WS_README.md` - This documentation file
 
 ## Setup
@@ -25,12 +27,24 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
    npm install
    ```
 
-2. Set your OpenAI API key:
+2. Configure environment variables:
+   
+   **Option A: Using environment variables**
    ```bash
    export OPENAI_API_KEY="your-api-key-here"
+   export WORKING_DIRECTORY="/path/to/your/project"  # Optional
    ```
    
-   **Note**: The server will automatically check for this environment variable on startup and exit with an error if it's not set.
+   **Option B: Using a .env file (recommended)**
+   ```bash
+   cp .env.example .env
+   # Edit .env with your configuration
+   ```
+   
+   **Note**: The server will automatically:
+   - Load variables from a `.env` file if present
+   - Check for `OPENAI_API_KEY` and exit with an error if not set
+   - Change to `WORKING_DIRECTORY` if specified (can be relative or absolute path)
 
 3. Install WebSocket dependencies:
    ```bash
@@ -200,7 +214,18 @@ When the agent requests approval for a command, the client can respond with:
 
 ## Configuration Options
 
-The server can be customized by modifying the `AgentLoop` initialization in `ws-server.ts`:
+### Environment Variables
+
+The server supports the following environment variables (can be set via `.env` file):
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `OPENAI_API_KEY` | Yes | Your OpenAI API key | `sk-...` |
+| `WORKING_DIRECTORY` | No | Working directory for the server | `/path/to/project` |
+
+### Code Configuration
+
+The server can also be customized by modifying the `AgentLoop` initialization in `ws-server.ts`:
 
 ```typescript
 const config: AppConfig = {

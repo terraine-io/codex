@@ -7,9 +7,16 @@ import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses
 import type { AppConfig } from './src/utils/config.js';
 import { ReviewDecision } from './src/utils/agent/review.js';
 import { randomUUID } from 'crypto';
+import { config } from 'dotenv';
+import { existsSync } from 'fs';
+import { resolve } from 'path';
 
-// Check for required environment variables on startup
-function checkEnvironment() {
+// Load environment variables and configure working directory
+function initializeEnvironment() {
+  // Load .env file if it exists
+  config();
+  
+  // Check for required API key
   if (!process.env.OPENAI_API_KEY) {
     console.error('❌ Error: OPENAI_API_KEY environment variable is not set');
     console.error('Please set your OpenAI API key:');
@@ -20,6 +27,28 @@ function checkEnvironment() {
   }
   
   console.log('✅ OPENAI_API_KEY is set');
+  
+  // Configure working directory if specified
+  const workingDir = process.env.WORKING_DIRECTORY;
+  if (workingDir) {
+    const absolutePath = resolve(workingDir);
+    
+    if (!existsSync(absolutePath)) {
+      console.error(`❌ Error: Working directory does not exist: ${absolutePath}`);
+      console.error('Please create the directory or update WORKING_DIRECTORY in your .env file');
+      process.exit(1);
+    }
+    
+    try {
+      process.chdir(absolutePath);
+      console.log(`✅ Changed working directory to: ${absolutePath}`);
+    } catch (error) {
+      console.error(`❌ Error: Failed to change to working directory: ${error.message}`);
+      process.exit(1);
+    }
+  } else {
+    console.log(`ℹ️  Using current working directory: ${process.cwd()}`);
+  }
 }
 
 // Message types for WebSocket communication
@@ -280,8 +309,8 @@ class WebSocketAgentServer {
   }
 }
 
-// Check environment before starting server
-checkEnvironment();
+// Initialize environment and working directory before starting server
+initializeEnvironment();
 
 // Example usage
 const server = new WebSocketAgentServer(8080);
