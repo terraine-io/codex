@@ -14,6 +14,7 @@ class AgentLoopClient {
     this.setupCLI();
     this.pendingApproval = null;
     this.suppressedItems = []; // Queue for items suppressed during approval
+    this.activeMessages = new Map(); // Track streaming messages by ID
   }
 
   setupWebSocket() {
@@ -144,25 +145,7 @@ class AgentLoopClient {
     
     switch (item.type) {
       case 'message':
-        if (item.role === 'assistant') {
-          console.log('\n🤖 Assistant:');
-          if (Array.isArray(item.content)) {
-            item.content.forEach(content => {
-              console.log(content.text || content);
-            });
-          } else if (item.content) {
-            console.log(item.content);
-          }
-        } else if (item.role === 'system') {
-          console.log('\n⚙️  System:');
-          if (Array.isArray(item.content)) {
-            item.content.forEach(content => {
-              console.log(content.text || content);
-            });
-          } else if (item.content) {
-            console.log(item.content);
-          }
-        }
+        this.handleStreamingMessage(item);
         break;
 
       case 'function_call':
@@ -257,6 +240,51 @@ class AgentLoopClient {
 
       default:
         console.log('\n📄 Response:', JSON.stringify(item, null, 2));
+    }
+  }
+
+  handleStreamingMessage(item) {
+    const messageId = item.id;
+    const role = item.role;
+    
+    // Extract text content from this chunk
+    let chunkText = '';
+    if (Array.isArray(item.content)) {
+      chunkText = item.content.map(content => content.text || content).join('');
+    } else if (item.content) {
+      chunkText = item.content;
+    }
+    
+    if (role === 'assistant') {
+      if (!this.activeMessages.has(messageId)) {
+        // First chunk - show the prefix and start accumulating
+        console.log('\n🤖 Assistant:');
+        this.activeMessages.set(messageId, { 
+          text: chunkText, 
+          role: 'assistant',
+          startTime: Date.now()
+        });
+        if (chunkText) {
+          process.stdout.write(chunkText);
+        }
+      } else {
+        // Subsequent chunk - append the new text
+        const existing = this.activeMessages.get(messageId);
+        if (chunkText) {
+          process.stdout.write(chunkText);
+          existing.text += chunkText; // Accumulate all chunks
+        }
+      }
+      
+      // If this is marked as completed, finalize the message
+      if (item.status === 'completed') {
+        this.activeMessages.delete(messageId);
+        console.log(''); // New line after completed message
+      }
+    } else if (role === 'system') {
+      // Handle system messages normally (they typically don't stream)
+      console.log('\n⚙️  System:');
+      console.log(chunkText);
     }
   }
 
