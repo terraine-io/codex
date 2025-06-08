@@ -11,6 +11,7 @@ import type {
   Tool,
 } from "openai/resources/responses/responses.mjs";
 import type { Reasoning } from "openai/resources.mjs";
+import type { IAgentLoop } from "./agent-loop-interface.js";
 
 import { CLI_VERSION } from "../../version.js";
 import {
@@ -113,7 +114,7 @@ const localShellTool: Tool = {
   type: "local_shell",
 };
 
-export class AgentLoop {
+export class AgentLoop implements IAgentLoop {
   private model: string;
   private provider: string;
   private instructions?: string;
@@ -256,7 +257,7 @@ export class AgentLoop {
     this.cancel();
   }
 
-  public sessionId: string;
+  public readonly sessionId: string;
   /*
    * Cumulative thinking time across this AgentLoop instance (ms).
    * Currently not used anywhere – comment out to keep the strict compiler

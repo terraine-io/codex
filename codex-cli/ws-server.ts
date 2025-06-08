@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { WebSocketServer, WebSocket } from 'ws';
-import { AgentLoop, CommandConfirmation } from './src/utils/agent/agent-loop.js';
+import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
 import type { AppConfig } from './src/utils/config.js';
@@ -117,7 +117,7 @@ interface ContextCompactedMessage extends WSMessage {
 
 class WebSocketAgentServer {
   private wss: WebSocketServer;
-  private agentLoop: AgentLoop | null = null;
+  private agentLoop: IAgentLoop | null = null;
   private ws: WebSocket | null = null;
   private contextManager: ContextManager | null = null;
   private pendingApprovalRequest: {
@@ -205,9 +205,15 @@ class WebSocketAgentServer {
       this.contextManager.clear();
     }
 
-    this.agentLoop = new AgentLoop({
+    // Determine provider from environment or auto-detect from model
+    const provider = (process.env.PROVIDER as 'openai' | 'anthropic' | 'google') || 
+                    AgentLoopFactory.detectProvider(config.model || 'codex-mini-latest');
+    
+    console.log(`🤖 SERVER: Creating AgentLoop with provider: ${provider}, model: ${config.model || 'codex-mini-latest'}`);
+    
+    this.agentLoop = AgentLoopFactory.create({
       model: config.model || 'codex-mini-latest',
-      provider: 'openai',
+      provider,
       config,
       instructions: config.instructions,
       approvalPolicy,
