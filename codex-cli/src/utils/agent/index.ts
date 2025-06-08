@@ -11,6 +11,9 @@ export { AgentLoopFactory } from "./agent-loop-factory.js";
 // Export original AgentLoop for backwards compatibility
 export { AgentLoop } from "./agent-loop.js";
 
+// Export Claude implementation
+export { ClaudeAgentLoop } from "./claude-agent-loop.js";
+
 // Export related types that consumers might need
 export type { ReviewDecision } from "./review.js";
 export type { CommandConfirmation } from "./agent-loop.js";

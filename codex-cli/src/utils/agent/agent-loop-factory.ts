@@ -1,5 +1,6 @@
 import type { IAgentLoop, FullAgentLoopConfig } from "./agent-loop-interface.js";
 import { AgentLoop } from "./agent-loop.js";
+import { ClaudeAgentLoop } from "./claude-agent-loop.js";
 
 /**
  * Factory for creating agent loop instances based on provider
@@ -14,7 +15,7 @@ export class AgentLoopFactory {
         return AgentLoopFactory.createOpenAI(config);
         
       case 'anthropic':
-        throw new Error('Claude/Anthropic provider not yet implemented');
+        return AgentLoopFactory.createClaude(config);
         
       case 'google':
         throw new Error('Gemini/Google provider not yet implemented');
@@ -22,6 +23,24 @@ export class AgentLoopFactory {
       default:
         throw new Error(`Unknown provider: ${config.provider}`);
     }
+  }
+  
+  /**
+   * Create Claude/Anthropic-based agent loop
+   */
+  private static createClaude(config: FullAgentLoopConfig): IAgentLoop {
+    return new ClaudeAgentLoop({
+      model: config.model,
+      instructions: config.instructions,
+      approvalPolicy: config.approvalPolicy,
+      disableResponseStorage: config.disableResponseStorage,
+      config: config.config,
+      additionalWritableRoots: config.additionalWritableRoots,
+      onItem: config.onItem,
+      onLoading: config.onLoading,
+      getCommandConfirmation: config.getCommandConfirmation,
+      onLastResponseId: config.onLastResponseId,
+    });
   }
   
   /**
