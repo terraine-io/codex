@@ -96,6 +96,46 @@ interface ApprovalResponseMessage {
 }
 ```
 
+### 3. Get Context Info Message
+
+Requests current context window usage information.
+
+```typescript
+interface GetContextInfoMessage {
+  id: string;
+  type: "get_context_info";
+  payload?: {};
+}
+```
+
+**Example:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440002",
+  "type": "get_context_info"
+}
+```
+
+### 4. Manual Compact Message
+
+Requests manual context compaction.
+
+```typescript
+interface ManualCompactMessage {
+  id: string;
+  type: "manual_compact";
+  payload?: {};
+}
+```
+
+**Example:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440003",
+  "type": "manual_compact"
+}
+```
+
 **Example:**
 ```json
 {
@@ -313,7 +353,67 @@ interface AgentFinishedMessage {
 }
 ```
 
-### 5. Error Message
+### 5. Context Info Message
+
+Reports current context window usage information.
+
+```typescript
+interface ContextInfoMessage {
+  id: string;
+  type: "context_info";
+  payload: {
+    tokenCount: number;
+    usagePercent: number;
+    transcriptLength: number;
+    maxTokens: number;
+  };
+}
+```
+
+**Example:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440011",
+  "type": "context_info",
+  "payload": {
+    "tokenCount": 45231,
+    "usagePercent": 35.4,
+    "transcriptLength": 87,
+    "maxTokens": 128000
+  }
+}
+```
+
+### 6. Context Compacted Message
+
+Reports that context has been automatically or manually compacted.
+
+```typescript
+interface ContextCompactedMessage {
+  id: string;
+  type: "context_compacted";
+  payload: {
+    oldTokenCount: number;
+    newTokenCount: number;
+    reductionPercent: number;
+  };
+}
+```
+
+**Example:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440012",
+  "type": "context_compacted",
+  "payload": {
+    "oldTokenCount": 98234,
+    "newTokenCount": 12456,
+    "reductionPercent": 87.3
+  }
+}
+```
+
+### 7. Error Message
 
 Reports errors that occur during processing.
 

@@ -2,23 +2,52 @@ import * as esbuild from "esbuild";
 import * as fs from "fs";
 import * as path from "path";
 
-console.log('Building WebSocket server...');
+const OUT_DIR = 'dist';
+
+// Ensure dist directory exists
+if (!fs.existsSync(OUT_DIR)) {
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+}
+
+console.log('Building WebSocket server and context manager...');
+
+// Build context manager
+await esbuild
+  .build({
+    entryPoints: ["context-manager.ts"],
+    bundle: true,
+    format: "esm",
+    platform: "node", 
+    tsconfig: "tsconfig.json",
+    outfile: `${OUT_DIR}/context-manager.js`,
+    sourcemap: true,
+    external: ["ws"], // Keep ws as external dependency
+    inject: ["./require-shim.js"],
+  })
+  .catch((error) => {
+    console.error('Failed to build context-manager:', error);
+    process.exit(1);
+  });
 
 // Build WebSocket server
-await esbuild.build({
-  entryPoints: ["ws-server.ts"],
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  tsconfig: "tsconfig.json",
-  outfile: "dist/ws-server.js",
-  minify: false,
-  sourcemap: true,
-  external: ["ws"], // Keep ws as external dependency
-  inject: ["./require-shim.js"],
-}).catch((err) => {
-  console.error('Build failed:', err);
-  process.exit(1);
-});
+await esbuild
+  .build({
+    entryPoints: ["ws-server.ts"],
+    bundle: true,
+    format: "esm", 
+    platform: "node",
+    tsconfig: "tsconfig.json",
+    outfile: `${OUT_DIR}/ws-server.js`,
+    sourcemap: true,
+    external: ["ws"], // Keep ws as external dependency
+    inject: ["./require-shim.js"],
+  })
+  .catch((error) => {
+    console.error('Failed to build ws-server:', error);
+    process.exit(1);
+  });
 
-console.log('WebSocket server built successfully at dist/ws-server.js');
+console.log('✅ WebSocket server build completed!');
+console.log(`Output files:`);
+console.log(`  - ${OUT_DIR}/context-manager.js`);
+console.log(`  - ${OUT_DIR}/ws-server.js`);

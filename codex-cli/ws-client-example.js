@@ -19,7 +19,10 @@ class AgentLoopClient {
     this.ws.on('open', () => {
       console.log('Connected to AgentLoop server');
       console.log('Type your message and press Enter to send to the agent.');
-      console.log('Type "exit" to quit.\n');
+      console.log('Commands:');
+      console.log('  /context - Show context window usage');
+      console.log('  /compact - Manually compact context');
+      console.log('  exit     - Quit the client\n');
       this.showPrompt();
     });
 
@@ -54,6 +57,41 @@ class AgentLoopClient {
     });
   }
 
+  handleContextInfo(payload) {
+    process.stdout.write('\r\x1b[K');
+    console.log('\n📊 Context Information:');
+    console.log(`   Token Count: ${payload.tokenCount.toLocaleString()} / ${payload.maxTokens.toLocaleString()}`);
+    console.log(`   Usage: ${payload.usagePercent.toFixed(1)}%`);
+    console.log(`   Transcript Length: ${payload.transcriptLength} items`);
+    
+    // Show visual progress bar
+    const barLength = 40;
+    const filledLength = Math.round((payload.usagePercent / 100) * barLength);
+    const bar = '█'.repeat(filledLength) + '░'.repeat(barLength - filledLength);
+    
+    let color = '';
+    if (payload.usagePercent > 80) color = '\x1b[31m'; // Red
+    else if (payload.usagePercent > 60) color = '\x1b[33m'; // Yellow
+    else color = '\x1b[32m'; // Green
+    
+    console.log(`   ${color}[${bar}]\x1b[0m ${payload.usagePercent.toFixed(1)}%`);
+    
+    if (payload.usagePercent > 80) {
+      console.log('   ⚠️  High context usage - consider using /compact');
+    }
+    
+    this.showPrompt();
+  }
+
+  handleContextCompacted(payload) {
+    process.stdout.write('\r\x1b[K');
+    console.log('\n🗜️ Context Compacted Successfully!');
+    console.log(`   Before: ${payload.oldTokenCount.toLocaleString()} tokens`);
+    console.log(`   After: ${payload.newTokenCount.toLocaleString()} tokens`);
+    console.log(`   Reduction: ${payload.reductionPercent.toFixed(1)}%`);
+    this.showPrompt();
+  }
+
   handleMessage(message) {
     switch (message.type) {
       case 'response_item':
@@ -70,6 +108,14 @@ class AgentLoopClient {
 
       case 'agent_finished':
         this.handleAgentFinished(message.payload);
+        break;
+
+      case 'context_info':
+        this.handleContextInfo(message.payload);
+        break;
+
+      case 'context_compacted':
+        this.handleContextCompacted(message.payload);
         break;
 
       case 'error':
@@ -208,6 +254,24 @@ class AgentLoopClient {
 
     if (input.trim() === '') {
       this.showPrompt();
+      return;
+    }
+
+    // Handle special commands
+    if (input.trim() === '/context') {
+      this.sendMessage({
+        id: randomUUID(),
+        type: 'get_context_info'
+      });
+      return;
+    }
+
+    if (input.trim() === '/compact') {
+      console.log('\n🗜️ Requesting manual context compaction...');
+      this.sendMessage({
+        id: randomUUID(),
+        type: 'manual_compact'
+      });
       return;
     }
 
