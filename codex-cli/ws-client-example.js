@@ -84,7 +84,7 @@ class AgentLoopClient {
   handleResponseItem(item) {
     // Clear the current line and move cursor to beginning
     process.stdout.write('\r\x1b[K');
-    console.log(`item: ${JSON.stringify(item, null, 2)}`)
+    //console.log(`${JSON.stringify(item, null, 2)}`)
     
     switch (item.type) {
       case 'message':
@@ -233,24 +233,24 @@ class AgentLoopClient {
     switch (choice) {
       case 'y':
       case 'yes':
-        review = 'YES';
+        review = 'yes';
         break;
       case 'n':
       case 'no':
-        review = 'NO';
+        review = 'no-exit';
         break;
       case 'c':
       case 'continue':
-        review = 'NO_CONTINUE';
+        review = 'no-continue';
         customDenyMessage = 'User denied command but requested to continue';
         break;
       case 'a':
       case 'always':
-        review = 'ALWAYS';
+        review = 'always';
         break;
       case 'e':
       case 'explain':
-        review = 'EXPLAIN';
+        review = 'explain';
         break;
       default:
         console.log('Invalid choice. Please enter y/n/c/a/e');

@@ -70,15 +70,14 @@ interface UserInputMessage {
           }
         ]
       }
-    ],
-    "previousResponseId": "resp_abc123"
+    ]
   }
 }
 ```
 
 **Fields:**
 - `input`: Array of input items (typically contains a user message)
-- `previousResponseId`: Optional ID from previous response for conversation continuity
+- `previousResponseId`: Optional ID from previous response (not used in current implementation due to stateless design)
 
 ### 2. Approval Response Message
 
@@ -103,18 +102,18 @@ interface ApprovalResponseMessage {
   "id": "550e8400-e29b-41d4-a716-446655440001",
   "type": "approval_response",
   "payload": {
-    "review": "YES",
+    "review": "yes",
     "customDenyMessage": null
   }
 }
 ```
 
 **Review Options:**
-- `YES`: Approve this specific command
-- `NO`: Deny command and stop all processing
-- `NO_CONTINUE`: Deny command but allow agent to continue with other tasks
-- `ALWAYS`: Approve this command and auto-approve similar commands in future
-- `EXPLAIN`: Ask the agent to explain what this command does before deciding
+- `"yes"`: Approve this specific command
+- `"no-exit"`: Deny command and stop all processing
+- `"no-continue"`: Deny command but allow agent to continue with other tasks
+- `"always"`: Approve this command and auto-approve similar commands in future
+- `"explain"`: Ask the agent to explain what this command does before deciding
 
 ---
 

@@ -237,6 +237,15 @@ const config: AppConfig = {
 const approvalPolicy: ApprovalPolicy = 'suggest'; // 'suggest', 'auto-edit', 'full-auto'
 ```
 
+## Session Management
+
+The WebSocket server creates a fresh `AgentLoop` instance for each client connection. This ensures:
+
+- **Clean State**: Each client gets a fresh conversation context
+- **No Cross-Session Contamination**: Function calls from previous sessions don't affect new connections
+- **Stateless Operation**: Uses `disableResponseStorage: true` to avoid server-side state issues
+- **Reliable Reconnection**: Clients can disconnect and reconnect without encountering stale function call errors
+
 ## Security Considerations
 
 - The server runs with the same permissions as the user who starts it

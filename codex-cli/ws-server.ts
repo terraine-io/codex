@@ -109,7 +109,7 @@ class WebSocketAgentServer {
     command: Array<string>;
     applyPatch?: ApplyPatchCommand;
   } | null = null;
-  private lastResponseId = '';
+  // Note: lastResponseId is not needed when disableResponseStorage: true
 
   constructor(port: number = 8080) {
     this.wss = new WebSocketServer({ port });
@@ -119,7 +119,7 @@ class WebSocketAgentServer {
 
   private setupWebSocketServer() {
     this.wss.on('connection', (ws) => {
-      console.log('Client connected');
+      console.log('Client connected - initializing new session');
       this.ws = ws;
 
       // Initialize AgentLoop when client connects
@@ -148,6 +148,16 @@ class WebSocketAgentServer {
   }
 
   private initializeAgentLoop() {
+    // Clean up any existing agent loop and reset state
+    if (this.agentLoop) {
+      console.log('Terminating existing AgentLoop');
+      this.agentLoop.terminate();
+    }
+    
+    // Reset all session state for new client
+    this.pendingApprovalRequest = null;
+    console.log('Creating new AgentLoop with fresh state');
+    
     // Default configuration - you can modify this based on your needs
     const config: AppConfig = {
       model: 'gpt-4', // Default model
@@ -164,7 +174,7 @@ class WebSocketAgentServer {
       instructions: config.instructions,
       approvalPolicy,
       additionalWritableRoots: [process.cwd()],
-      disableResponseStorage: false,
+      disableResponseStorage: true,
       
       // Callback for streaming response items back to client
       onItem: (item: ResponseItem) => {
@@ -212,11 +222,8 @@ class WebSocketAgentServer {
 
       // Callback for tracking response IDs
       onLastResponseId: (responseId: string) => {
-        this.lastResponseId = responseId;
-        
-        // Check if the agent is finished (no more tool calls pending)
-        // We can determine this by checking if the response is complete
-        // and no further input is expected
+        // With disableResponseStorage: true, we don't need to track response IDs
+        // but we still signal when the agent is finished
         this.sendMessage({
           id: randomUUID(),
           type: 'agent_finished',
@@ -248,10 +255,11 @@ class WebSocketAgentServer {
     }
 
     try {
-      const { input, previousResponseId } = message.payload;
+      const { input } = message.payload;
       
-      // Start the agent loop with the user input
-      await this.agentLoop.run(input, previousResponseId || this.lastResponseId);
+      // Since we're using disableResponseStorage: true, we don't need previousResponseId
+      // Each request is self-contained and doesn't rely on server-side conversation state
+      await this.agentLoop.run(input);
       
     } catch (error) {
       console.error('Error running AgentLoop:', error);
@@ -266,6 +274,7 @@ class WebSocketAgentServer {
     }
 
     try {
+      console.log('Processing approval response:', message.payload.review);
       // Resolve the pending approval request with the user's decision
       this.pendingApprovalRequest.resolve(message.payload);
       this.pendingApprovalRequest = null;
