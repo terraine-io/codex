@@ -11,6 +11,7 @@ import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
 import { existsSync } from 'fs';
 import { resolve } from 'path';
+import { initLogger, debug } from './src/utils/logger/log.js';
 
 // Load environment variables and configure working directory
 function initializeEnvironment() {
@@ -627,6 +628,13 @@ class WebSocketAgentServer {
 
 // Initialize environment and working directory before starting server
 initializeEnvironment();
+
+// Initialize logger and show current log level
+const logger = initLogger();
+if (logger.isLoggingEnabled()) {
+  const logLevel = process.env.LOG_LEVEL || process.env.DEBUG || 'none';
+  debug(`🐛 Logging enabled with level: ${logLevel.toUpperCase()}`);
+}
 
 // Example usage
 const server = new WebSocketAgentServer(8080);

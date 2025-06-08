@@ -3,29 +3,87 @@ import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
 
+export enum LogLevel {
+  NONE = 0,
+  ERROR = 1,
+  WARN = 2,
+  INFO = 3,
+  DEBUG = 4,
+  TRACE = 5
+}
+
 interface Logger {
   /** Checking this can be used to avoid constructing a large log message. */
   isLoggingEnabled(): boolean;
+  
+  /** Check if a specific log level is enabled */
+  isLevelEnabled(level: LogLevel): boolean;
 
   log(message: string): void;
+  error(message: string): void;
+  warn(message: string): void;
+  info(message: string): void;
+  debug(message: string): void;
+  trace(message: string): void;
 }
 
 class AsyncLogger implements Logger {
   private queue: Array<string> = [];
   private isWriting: boolean = false;
+  private currentLevel: LogLevel;
 
-  constructor(private filePath: string) {
+  constructor(private filePath: string, level: LogLevel) {
     this.filePath = filePath;
+    this.currentLevel = level;
   }
 
   isLoggingEnabled(): boolean {
-    return true;
+    return this.currentLevel > LogLevel.NONE;
+  }
+  
+  isLevelEnabled(level: LogLevel): boolean {
+    return this.currentLevel >= level;
+  }
+
+  private writeLog(level: string, message: string): void {
+    if (!this.isLoggingEnabled()) return;
+    const entry = `[${now()}] [${level}] ${message}\n`;
+    this.queue.push(entry);
+    this.maybeWrite();
   }
 
   log(message: string): void {
-    const entry = `[${now()}] ${message}\n`;
-    this.queue.push(entry);
-    this.maybeWrite();
+    this.writeLog('INFO', message);
+  }
+  
+  error(message: string): void {
+    if (this.isLevelEnabled(LogLevel.ERROR)) {
+      this.writeLog('ERROR', message);
+    }
+  }
+  
+  warn(message: string): void {
+    if (this.isLevelEnabled(LogLevel.WARN)) {
+      this.writeLog('WARN', message);
+    }
+  }
+  
+  info(message: string): void {
+    if (this.isLevelEnabled(LogLevel.INFO)) {
+      this.writeLog('INFO', message);
+    }
+  }
+  
+  debug(message: string): void {
+    if (this.isLevelEnabled(LogLevel.DEBUG)) {
+      this.writeLog('DEBUG', message);
+    }
+  }
+  
+  trace(message: string): void {
+    if (this.isLevelEnabled(LogLevel.TRACE)) {
+      this.writeLog('TRACE', message);
+    }
   }
 
   private async maybeWrite(): Promise<void> {
@@ -51,8 +109,32 @@ class EmptyLogger implements Logger {
   isLoggingEnabled(): boolean {
     return false;
   }
+  
+  isLevelEnabled(_level: LogLevel): boolean {
+    return false;
+  }
 
   log(_message: string): void {
+    // No-op
+  }
+  
+  error(_message: string): void {
+    // No-op
+  }
+  
+  warn(_message: string): void {
+    // No-op
+  }
+  
+  info(_message: string): void {
+    // No-op
+  }
+  
+  debug(_message: string): void {
+    // No-op
+  }
+  
+  trace(_message: string): void {
     // No-op
   }
 }
@@ -70,17 +152,44 @@ function now() {
 
 let logger: Logger;
 
+function parseLogLevel(levelStr: string | undefined): LogLevel {
+  if (!levelStr) return LogLevel.NONE;
+  
+  const level = levelStr.toLowerCase();
+  switch (level) {
+    case 'error': return LogLevel.ERROR;
+    case 'warn': case 'warning': return LogLevel.WARN;
+    case 'info': return LogLevel.INFO;
+    case 'debug': return LogLevel.DEBUG;
+    case 'trace': return LogLevel.TRACE;
+    case 'none': case 'off': return LogLevel.NONE;
+    default:
+      // For backward compatibility, treat any truthy DEBUG value as INFO level
+      return level === 'true' || level === '1' ? LogLevel.INFO : LogLevel.NONE;
+  }
+}
+
 /**
  * Creates a .log file for this session, but also symlinks codex-cli-latest.log
  * to the current log file so you can reliably run:
  *
  * - Mac/Windows: `tail -F "$TMPDIR/oai-codex/codex-cli-latest.log"`
  * - Linux: `tail -F ~/.local/oai-codex/codex-cli-latest.log`
+ * 
+ * Log levels can be controlled with DEBUG or LOG_LEVEL environment variables:
+ * - DEBUG=true (backward compatibility, sets INFO level)
+ * - LOG_LEVEL=debug (sets DEBUG level)
+ * - LOG_LEVEL=trace (sets TRACE level - most verbose)
  */
 export function initLogger(): Logger {
   if (logger) {
     return logger;
-  } else if (!process.env["DEBUG"]) {
+  }
+  
+  // Check LOG_LEVEL first, then fall back to DEBUG for backward compatibility
+  const logLevel = parseLogLevel(process.env["LOG_LEVEL"] || process.env["DEBUG"]);
+  
+  if (logLevel === LogLevel.NONE) {
     logger = new EmptyLogger();
     return logger;
   }
@@ -116,12 +225,32 @@ export function initLogger(): Logger {
     }
   }
 
-  logger = new AsyncLogger(logFile);
+  logger = new AsyncLogger(logFile, logLevel);
   return logger;
 }
 
 export function log(message: string): void {
   (logger ?? initLogger()).log(message);
+}
+
+export function error(message: string): void {
+  (logger ?? initLogger()).error(message);
+}
+
+export function warn(message: string): void {
+  (logger ?? initLogger()).warn(message);
+}
+
+export function info(message: string): void {
+  (logger ?? initLogger()).info(message);
+}
+
+export function debug(message: string): void {
+  (logger ?? initLogger()).debug(message);
+}
+
+export function trace(message: string): void {
+  (logger ?? initLogger()).trace(message);
 }
 
 /**
@@ -134,4 +263,16 @@ export function log(message: string): void {
  */
 export function isLoggingEnabled(): boolean {
   return (logger ?? initLogger()).isLoggingEnabled();
+}
+
+/**
+ * Check if a specific log level is enabled. Useful for guarding expensive log message construction.
+ * 
+ * @example
+ * if (isLevelEnabled(LogLevel.TRACE)) {
+ *   trace(`Expensive data: ${JSON.stringify(largeObject, null, 2)}`);
+ * }
+ */
+export function isLevelEnabled(level: LogLevel): boolean {
+  return (logger ?? initLogger()).isLevelEnabled(level);
 }

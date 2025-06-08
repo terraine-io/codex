@@ -15,7 +15,7 @@ import {
 } from "./claude-types.js";
 import { getClaudeTools, executeClaudeTool, type ClaudeToolContext } from "./claude-tools.js";
 import { randomUUID } from "crypto";
-import { log } from "../logger/log.js";
+import { log, debug, trace, isLevelEnabled, LogLevel } from "../logger/log.js";
 
 /**
  * Configuration specific to Claude AgentLoop
@@ -106,10 +106,10 @@ export class ClaudeAgentLoop implements IAgentLoop {
       const clientConfig: any = {};
       
       if (this.config.apiKey) {
-        console.log(`🔑 Using Claude API key from config: ${this.config.apiKey.substring(0, 10)}...`);
+        debug(`🔑 Using Claude API key from config: ${this.config.apiKey.substring(0, 10)}...`);
         clientConfig.apiKey = this.config.apiKey;
       } else {
-        console.log(`🔑 Using Claude API key from ANTHROPIC_API_KEY environment variable`);
+        debug(`🔑 Using Claude API key from ANTHROPIC_API_KEY environment variable`);
         // Let SDK use environment variable automatically
       }
       
@@ -173,7 +173,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
             };
             
             this.claudeMessages.push(userMessage);
-            console.log(`\n👤 ADDED USER MESSAGE:`, JSON.stringify(userMessage, null, 2));
+            trace(`👤 ADDED USER MESSAGE: ${JSON.stringify(userMessage, null, 2)}`);
           }
         }
         
@@ -185,11 +185,12 @@ export class ClaudeAgentLoop implements IAgentLoop {
       const messages = this.disableResponseStorage ? this.claudeMessages : 
         ClaudeFormatConverter.convertInputToClaudeMessages(input);
       
-      console.log(`\n📋 FULL CONVERSATION STATE (${messages.length} messages):`);
-      messages.forEach((msg, i) => {
-        console.log(`\n  Message ${i} (${msg.role}):`);
-        console.log(`    content:`, JSON.stringify(msg.content, null, 4));
-      });
+      if (isLevelEnabled(LogLevel.TRACE)) {
+        trace(`📋 FULL CONVERSATION STATE (${messages.length} messages):`);
+        messages.forEach((msg, i) => {
+          trace(`  Message ${i} (${msg.role}): ${JSON.stringify(msg.content, null, 4)}`);
+        });
+      }
       
       // Prepare Claude API request
       const request: ClaudeCreateMessageRequest = {
@@ -201,7 +202,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
         ...(this.instructions ? { system: this.instructions } : {})
       };
       
-      console.log(`\n🚀 CLAUDE REQUEST:`, JSON.stringify(request, null, 2));
+      if (isLevelEnabled(LogLevel.TRACE)) {
+        trace(`🚀 CLAUDE REQUEST: ${JSON.stringify(request, null, 2)}`);
+      }
       
       // Make streaming request to Claude
       const stream = this.anthropic.messages.stream(request);
@@ -238,7 +241,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
       stream.on('message', (message: ClaudeCreateMessageResponse) => {
         if (this.canceled || thisGeneration !== this.generation) return;
         
-        console.log(`\n📨 CLAUDE RESPONSE:`, JSON.stringify(message, null, 2));
+        if (isLevelEnabled(LogLevel.TRACE)) {
+          trace(`📨 CLAUDE RESPONSE: ${JSON.stringify(message, null, 2)}`);
+        }
         
         responseId = message.id;
         
@@ -261,7 +266,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
             });
           }
           
-          console.log(`\n💾 UPDATED CLAUDE MESSAGES (${this.claudeMessages.length} total):`, JSON.stringify(this.claudeMessages, null, 2));
+          if (isLevelEnabled(LogLevel.TRACE)) {
+            trace(`💾 UPDATED CLAUDE MESSAGES (${this.claudeMessages.length} total): ${JSON.stringify(this.claudeMessages, null, 2)}`);
+          }
           
           // Also store in transcript for compatibility
           const responseItem: ResponseInputItem = {
@@ -378,8 +385,10 @@ export class ClaudeAgentLoop implements IAgentLoop {
         };
         
         this.claudeMessages.push(toolResultMessage);
-        console.log(`\n🔧 ADDED TOOL RESULT:`, JSON.stringify(toolResultMessage, null, 2));
-        console.log(`\n💾 UPDATED CLAUDE MESSAGES AFTER TOOL (${this.claudeMessages.length} total):`, JSON.stringify(this.claudeMessages, null, 2));
+        trace(`🔧 ADDED TOOL RESULT: ${JSON.stringify(toolResultMessage, null, 2)}`);
+        if (isLevelEnabled(LogLevel.TRACE)) {
+          trace(`💾 UPDATED CLAUDE MESSAGES AFTER TOOL (${this.claudeMessages.length} total): ${JSON.stringify(this.claudeMessages, null, 2)}`);
+        }
         
         // Also add to transcript for compatibility
         this.transcript.push({
