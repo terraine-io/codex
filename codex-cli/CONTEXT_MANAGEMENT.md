@@ -1,6 +1,14 @@
 # Context Window Management
 
-This WebSocket server implementation includes automatic context window management to handle long-running conversations that might exceed the model's token limits.
+This WebSocket server implementation includes flexible context window management strategies to handle long-running conversations that might exceed the model's token limits.
+
+## Strategy Pattern Architecture
+
+The system uses an abstract `ContextManager` base class with pluggable strategies:
+
+- **`ThresholdContextManager`**: Auto-compacts when usage exceeds a configurable threshold
+- **`DummyContextManager`**: Never auto-compacts, provides manual control only
+- **Extensible**: Easy to add new strategies (sliding window, importance-based, etc.)
 
 ## How It Works
 
@@ -30,13 +38,31 @@ This provides a clean restart while preserving conversation context in a compres
 Set these environment variables in your `.env` file:
 
 ```bash
+# Context management strategy (default: threshold)
+CONTEXT_STRATEGY=threshold  # or 'dummy'
+
 # Context compaction threshold (0.0 to 1.0, default: 0.8)
+# Only used with threshold strategy
 CONTEXT_COMPACTION_THRESHOLD=0.8
 
 # Model and instructions (affects context limits)
 MODEL=gpt-4
 INSTRUCTIONS=Your custom instructions here
 ```
+
+### Strategy Selection
+
+#### Threshold Strategy (`CONTEXT_STRATEGY=threshold`)
+- **Automatic compaction**: Triggers when usage exceeds threshold (default: 80%)
+- **Production-ready**: Handles long conversations seamlessly
+- **Configurable**: Adjust threshold based on use case
+- **Use case**: Production deployments, long-running sessions
+
+#### Dummy Strategy (`CONTEXT_STRATEGY=dummy`)
+- **No auto-compaction**: Manual control only
+- **Warning system**: Alerts at 90%+ usage
+- **Testing-friendly**: Predictable behavior for debugging
+- **Use case**: Development, testing, scenarios requiring manual control
 
 ## WebSocket Protocol Extensions
 
@@ -89,11 +115,13 @@ INSTRUCTIONS=Your custom instructions here
 
 ## Architecture
 
-### ContextManager Class
+### ContextManager Architecture
+- **Abstract base class**: Provides common functionality (transcript tracking, token counting)
+- **Strategy pattern**: Pluggable compaction behaviors via concrete implementations
+- **Factory function**: `createContextManager(strategy, config)` for easy instantiation
 - **Mirrors transcript**: Tracks all ResponseItems via AgentLoop callbacks
 - **Token estimation**: Uses same approximation as AgentLoop (~4 chars/token)
-- **Compaction logic**: Generates summaries and manages AgentLoop recreation
-- **Event-driven**: Triggers compaction via callback when thresholds are reached
+- **Event-driven**: Triggers compaction via callback when conditions are met
 
 ### WebSocketAgentServer Integration  
 - **Callback integration**: Connects ContextManager to AgentLoop via `onItem`
@@ -102,10 +130,11 @@ INSTRUCTIONS=Your custom instructions here
 
 ### Key Design Decisions
 
-1. **External management**: Context tracking is separate from AgentLoop internals
-2. **AgentLoop recreation**: Clean solution that works with existing codebase
-3. **Callback-based**: Leverages existing AgentLoop callback system
-4. **Configurable thresholds**: Allows tuning based on use case and model
+1. **Strategy pattern**: Easy to add new compaction behaviors without changing core logic
+2. **External management**: Context tracking is separate from AgentLoop internals
+3. **AgentLoop recreation**: Clean solution that works with existing codebase
+4. **Callback-based**: Leverages existing AgentLoop callback system
+5. **Configurable**: Both strategy selection and parameters via environment variables
 
 ## Usage Example
 

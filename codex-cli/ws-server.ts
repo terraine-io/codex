@@ -6,7 +6,7 @@ import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
 import type { AppConfig } from './src/utils/config.js';
 import { ReviewDecision } from './src/utils/agent/review.js';
-import { ContextManager, type ContextInfo } from './context-manager.js';
+import { ContextManager, createContextManager, type ContextInfo } from './context-managers.js';
 import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
 import { existsSync } from 'fs';
@@ -111,6 +111,7 @@ interface ContextCompactedMessage extends WSMessage {
     oldTokenCount: number;
     newTokenCount: number;
     reductionPercent: number;
+    strategy: string;
   };
 }
 
@@ -185,11 +186,15 @@ class WebSocketAgentServer {
 
     // Initialize context manager if not exists or reset if recreating
     if (!this.contextManager) {
-      this.contextManager = new ContextManager({
+      // Initialize context manager using factory
+      const strategy = process.env.CONTEXT_STRATEGY || 'threshold';
+      this.contextManager = createContextManager(strategy, {
         model: config.model || 'gpt-4',
         compactionThreshold: parseFloat(process.env.CONTEXT_COMPACTION_THRESHOLD || '0.8'),
         config
       });
+      
+      console.log(`Using context management strategy: ${this.contextManager.getStrategyName()}`);
 
       // Set up auto-compaction callback
       this.contextManager.onCompactionNeeded = async (transcript) => {
@@ -402,7 +407,8 @@ class WebSocketAgentServer {
         payload: {
           oldTokenCount,
           newTokenCount,
-          reductionPercent
+          reductionPercent,
+          strategy: this.contextManager.getStrategyName()
         }
       });
       

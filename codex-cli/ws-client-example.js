@@ -60,6 +60,7 @@ class AgentLoopClient {
   handleContextInfo(payload) {
     process.stdout.write('\r\x1b[K');
     console.log('\n📊 Context Information:');
+    console.log(`   Strategy: ${payload.strategy || 'Unknown'}`);
     console.log(`   Token Count: ${payload.tokenCount.toLocaleString()} / ${payload.maxTokens.toLocaleString()}`);
     console.log(`   Usage: ${payload.usagePercent.toFixed(1)}%`);
     console.log(`   Transcript Length: ${payload.transcriptLength} items`);
@@ -86,6 +87,7 @@ class AgentLoopClient {
   handleContextCompacted(payload) {
     process.stdout.write('\r\x1b[K');
     console.log('\n🗜️ Context Compacted Successfully!');
+    console.log(`   Strategy: ${payload.strategy || 'Unknown'}`);
     console.log(`   Before: ${payload.oldTokenCount.toLocaleString()} tokens`);
     console.log(`   After: ${payload.newTokenCount.toLocaleString()} tokens`);
     console.log(`   Reduction: ${payload.reductionPercent.toFixed(1)}%`);

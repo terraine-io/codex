@@ -366,6 +366,7 @@ interface ContextInfoMessage {
     usagePercent: number;
     transcriptLength: number;
     maxTokens: number;
+    strategy: string;
   };
 }
 ```
@@ -379,7 +380,8 @@ interface ContextInfoMessage {
     "tokenCount": 45231,
     "usagePercent": 35.4,
     "transcriptLength": 87,
-    "maxTokens": 128000
+    "maxTokens": 128000,
+    "strategy": "ThresholdContextManager"
   }
 }
 ```
@@ -396,6 +398,7 @@ interface ContextCompactedMessage {
     oldTokenCount: number;
     newTokenCount: number;
     reductionPercent: number;
+    strategy: string;
   };
 }
 ```
@@ -408,7 +411,8 @@ interface ContextCompactedMessage {
   "payload": {
     "oldTokenCount": 98234,
     "newTokenCount": 12456,
-    "reductionPercent": 87.3
+    "reductionPercent": 87.3,
+    "strategy": "ThresholdContextManager"
   }
 }
 ```
