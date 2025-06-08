@@ -216,9 +216,12 @@ class WebSocketAgentServer {
       
       // Callback for streaming response items back to client
       onItem: (item: ResponseItem) => {
+        console.log(`📨 SERVER: Received response item type: ${item.type}${item.type === 'local_shell_call' ? ` (command: ${(item as any).action?.command?.join(' ')})` : ''}`);
+        
         // Add to context manager first for tracking
         this.contextManager?.addItem(item);
         
+        console.log(`📤 SERVER: Sending response item to client: ${item.type}`);
         // Then send to client
         this.sendMessage({
           id: randomUUID(),
@@ -241,6 +244,7 @@ class WebSocketAgentServer {
         command: Array<string>,
         applyPatch?: ApplyPatchCommand
       ): Promise<CommandConfirmation> => {
+        console.log(`🔒 SERVER: Requesting approval for command: ${command.join(' ')}`);
         return new Promise((resolve, reject) => {
           // Store the pending request
           this.pendingApprovalRequest = {
@@ -250,6 +254,7 @@ class WebSocketAgentServer {
             applyPatch,
           };
 
+          console.log(`📤 SERVER: Sending approval request to client`);
           // Send approval request to client
           this.sendMessage({
             id: randomUUID(),
@@ -259,6 +264,7 @@ class WebSocketAgentServer {
               applyPatch,
             },
           });
+          console.log(`⏳ SERVER: Waiting for approval response...`);
         });
       },
 
@@ -302,7 +308,7 @@ class WebSocketAgentServer {
         break;
         
       case 'approval_response':
-        this.handleApprovalResponse(message as ApprovalResponseMessage);
+        await this.handleApprovalResponse(message as ApprovalResponseMessage);
         break;
 
       case 'get_context_info':
@@ -346,17 +352,76 @@ class WebSocketAgentServer {
     }
   }
 
-  private handleApprovalResponse(message: ApprovalResponseMessage) {
+  private async handleApprovalResponse(message: ApprovalResponseMessage) {
     if (!this.pendingApprovalRequest) {
       this.sendError('No pending approval request');
       return;
     }
 
     try {
-      console.log('Processing approval response:', message.payload.review);
+      console.log(`✅ SERVER: Received approval response: ${message.payload.review}`);
+      
+      // Handle explanation request specially
+      if (message.payload.review === 'explain') {
+        console.log(`🤔 SERVER: Handling explanation request`);
+        
+        try {
+          // Generate explanation using AI model
+          const explanation = await this.generateCommandExplanation(this.pendingApprovalRequest.command);
+          
+          // Send explanation message back to client
+          this.sendMessage({
+            id: randomUUID(),
+            type: 'response_item',
+            payload: {
+              id: randomUUID(),
+              type: 'message',
+              role: 'assistant',
+              content: [{
+                type: 'input_text',
+                text: explanation
+              }]
+            }
+          });
+          
+        } catch (error) {
+          console.error('Failed to generate explanation:', error);
+          this.sendMessage({
+            id: randomUUID(),
+            type: 'response_item',
+            payload: {
+              id: randomUUID(),
+              type: 'message',
+              role: 'assistant',
+              content: [{
+                type: 'input_text',
+                text: `Unable to generate explanation for command "${this.pendingApprovalRequest.command.join(' ')}" due to an error. Please make a decision on whether to approve this command.`
+              }]
+            }
+          });
+        }
+        
+        // Send a new approval request (don't resolve the promise yet)
+        this.sendMessage({
+          id: randomUUID(),
+          type: 'approval_request',
+          payload: {
+            command: this.pendingApprovalRequest.command,
+            applyPatch: this.pendingApprovalRequest.applyPatch,
+          },
+        });
+        
+        console.log(`📤 SERVER: Sent explanation and renewed approval request`);
+        return; // Don't resolve the approval yet
+      }
+      
+      console.log(`🚀 SERVER: Resolving approval promise - command can now execute`);
+      
       // Resolve the pending approval request with the user's decision
       this.pendingApprovalRequest.resolve(message.payload);
       this.pendingApprovalRequest = null;
+      
+      console.log(`📝 SERVER: Approval resolved, AgentLoop should continue execution`);
     } catch (error) {
       console.error('Error handling approval response:', error);
       this.sendError('Failed to process approval response', error);
@@ -442,6 +507,45 @@ class WebSocketAgentServer {
       type: 'context_info',
       payload: contextInfo,
     });
+  }
+
+  private async generateCommandExplanation(command: Array<string>): Promise<string> {
+    try {
+      console.log(`🤖 SERVER: Generating explanation for command: ${command.join(' ')}`);
+      
+      // Create OpenAI client (reuse the same configuration as AgentLoop)
+      const OpenAI = (await import('openai')).default;
+      const oai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+        timeout: 30000, // 30 second timeout for explanation
+      });
+
+      // Format the command for display  
+      const commandForDisplay = command.join(' ');
+
+      // Create explanation request (same prompt as TUI)
+      const response = await oai.chat.completions.create({
+        model: 'gpt-4', // Use a reliable model for explanations
+        messages: [
+          {
+            role: 'system',
+            content: 'You are an expert in shell commands and terminal operations. Your task is to provide detailed, accurate explanations of shell commands that users are considering executing. Break down each part of the command, explain what it does, identify any potential risks or side effects, and explain why someone might want to run it. Be specific about what files or systems will be affected. If the command could potentially be harmful, make sure to clearly highlight those risks.',
+          },
+          {
+            role: 'user',
+            content: `Please explain this shell command in detail: \`${commandForDisplay}\`\n\nProvide a structured explanation that includes:\n1. A brief overview of what the command does\n2. A breakdown of each part of the command (flags, arguments, etc.)\n3. What files, directories, or systems will be affected\n4. Any potential risks or side effects\n5. Why someone might want to run this command\n\nBe specific and technical - this explanation will help the user decide whether to approve or reject the command.`,
+          },
+        ],
+      });
+
+      const explanation = response.choices[0]?.message.content || 'Unable to generate explanation.';
+      console.log(`✅ SERVER: Generated explanation (${explanation.length} chars)`);
+      return explanation;
+      
+    } catch (error) {
+      console.error('❌ SERVER: Error generating command explanation:', error);
+      throw error;
+    }
   }
 
   private cleanup() {

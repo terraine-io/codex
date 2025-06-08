@@ -13,6 +13,7 @@ class AgentLoopClient {
     this.setupWebSocket();
     this.setupCLI();
     this.pendingApproval = null;
+    this.suppressedItems = []; // Queue for items suppressed during approval
   }
 
   setupWebSocket() {
@@ -132,20 +133,35 @@ class AgentLoopClient {
   handleResponseItem(item) {
     // Clear the current line and move cursor to beginning
     process.stdout.write('\r\x1b[K');
+    
+    // Suppress shell command display during pending approval
+    if (this.pendingApproval && (item.type === 'local_shell_call' || item.type === 'local_shell_call_output')) {
+      this.suppressedItems.push(item);
+      return; // Don't display shell commands until approval is resolved
+    }
+    
     //console.log(`${JSON.stringify(item, null, 2)}`)
     
     switch (item.type) {
       case 'message':
         if (item.role === 'assistant') {
           console.log('\n🤖 Assistant:');
-          item.content.forEach(content => {
-            console.log(content.text);
-          });
+          if (Array.isArray(item.content)) {
+            item.content.forEach(content => {
+              console.log(content.text || content);
+            });
+          } else if (item.content) {
+            console.log(item.content);
+          }
         } else if (item.role === 'system') {
           console.log('\n⚙️  System:');
-          item.content.forEach(content => {
-            console.log(content.text);
-          });
+          if (Array.isArray(item.content)) {
+            item.content.forEach(content => {
+              console.log(content.text || content);
+            });
+          } else if (item.content) {
+            console.log(item.content);
+          }
         }
         break;
 
@@ -159,6 +175,29 @@ class AgentLoopClient {
           } catch {
             console.log('Arguments:', item.arguments);
           }
+        }
+        break;
+
+      case 'local_shell_call':
+        console.log('\n🔧 Shell Command:');
+        console.log(`Command: ${item.action.command.join(' ')}`);
+        if (item.status === 'completed') {
+          console.log('Status: ✅ Completed');
+        }
+        break;
+
+      case 'local_shell_call_output':
+        console.log('\n📤 Shell Output:');
+        try {
+          const output = JSON.parse(item.output);
+          if (output.output) {
+            console.log(output.output.trim());
+          }
+          if (output.metadata) {
+            console.log(`Exit code: ${output.metadata.exit_code}, Duration: ${output.metadata.duration_seconds}s`);
+          }
+        } catch {
+          console.log(item.output);
         }
         break;
 
@@ -179,14 +218,56 @@ class AgentLoopClient {
 
       case 'reasoning':
         console.log('\n🤔 Reasoning:');
-        item.content.forEach(content => {
-          console.log(content.text);
-        });
+        
+        // Handle different reasoning formats
+        let hasContent = false;
+        
+        // Check for summary array (codex format)
+        if (Array.isArray(item.summary) && item.summary.length > 0) {
+          item.summary.forEach(summary => {
+            console.log(summary.text || summary);
+          });
+          hasContent = true;
+        }
+        
+        // Check for content array (gpt format)
+        if (Array.isArray(item.content) && item.content.length > 0) {
+          item.content.forEach(content => {
+            console.log(content.text || content);
+          });
+          hasContent = true;
+        }
+        
+        // Check for direct content or reasoning field
+        if (!hasContent) {
+          if (item.content) {
+            console.log(item.content);
+            hasContent = true;
+          } else if (item.reasoning) {
+            console.log(item.reasoning);
+            hasContent = true;
+          }
+        }
+        
+        // Show timing info if no visible reasoning content
+        if (!hasContent) {
+          console.log(`(thinking for ${item.duration_ms}ms...)`);
+        }
         break;
 
       default:
         console.log('\n📄 Response:', JSON.stringify(item, null, 2));
     }
+  }
+
+  processSuppressedItems() {
+    // Display any items that were suppressed during approval
+    const items = this.suppressedItems;
+    this.suppressedItems = [];
+    
+    items.forEach(item => {
+      this.handleResponseItem(item);
+    });
   }
 
   handleLoadingState(payload) {
@@ -318,6 +399,7 @@ class AgentLoopClient {
       case 'explain':
         review = 'explain';
         break;
+        
       default:
         console.log('Invalid choice. Please enter y/n/c/a/e');
         this.rl.prompt();
@@ -335,8 +417,16 @@ class AgentLoopClient {
       }
     });
 
-    this.pendingApproval = null;
-    console.log(`✓ Response sent: ${review}`);
+    // Only clear pending approval if it's not an explain request
+    if (review !== 'explain') {
+      this.pendingApproval = null;
+      console.log(`✓ Response sent: ${review}`);
+      
+      // Process any items that were suppressed during approval
+      this.processSuppressedItems();
+    } else {
+      console.log(`🤔 Explanation requested...`);
+    }
   }
 
   sendMessage(message) {
