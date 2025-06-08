@@ -177,7 +177,7 @@ class WebSocketAgentServer {
     
     // Default configuration - you can modify this based on your needs
     const config: AppConfig = {
-      model: process.env.MODEL || 'gpt-4', // Allow model override via env
+      model: process.env.MODEL || 'codex-mini-latest', // Use same default as TUI for better tool behavior
       instructions: process.env.INSTRUCTIONS || '', // Allow instructions override via env
       apiKey: process.env.OPENAI_API_KEY,
     };
@@ -189,7 +189,7 @@ class WebSocketAgentServer {
       // Initialize context manager using factory
       const strategy = process.env.CONTEXT_STRATEGY || 'threshold';
       this.contextManager = createContextManager(strategy, {
-        model: config.model || 'gpt-4',
+        model: config.model || 'codex-mini-latest',
         compactionThreshold: parseFloat(process.env.CONTEXT_COMPACTION_THRESHOLD || '0.8'),
         config
       });
@@ -206,7 +206,7 @@ class WebSocketAgentServer {
     }
 
     this.agentLoop = new AgentLoop({
-      model: config.model || 'gpt-4',
+      model: config.model || 'codex-mini-latest',
       provider: 'openai',
       config,
       instructions: config.instructions,
