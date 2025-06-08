@@ -17,17 +17,43 @@ function initializeEnvironment() {
   // Load .env file if it exists
   config();
   
-  // Check for required API key
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('❌ Error: OPENAI_API_KEY environment variable is not set');
-    console.error('Please set your OpenAI API key:');
-    console.error('  export OPENAI_API_KEY="your-api-key-here"');
-    console.error('');
-    console.error('You can get an API key from: https://platform.openai.com/account/api-keys');
-    process.exit(1);
-  }
+  // Determine which provider will be used to check for appropriate API key
+  const model = process.env.MODEL || 'codex-mini-latest';
+  const provider = process.env.PROVIDER || AgentLoopFactory.detectProvider(model);
   
-  console.log('✅ OPENAI_API_KEY is set');
+  // Check for required API key based on provider
+  if (provider === 'anthropic') {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error('❌ Error: ANTHROPIC_API_KEY environment variable is not set');
+      console.error('Please set your Anthropic API key:');
+      console.error('  export ANTHROPIC_API_KEY="your-api-key-here"');
+      console.error('');
+      console.error('You can get an API key from: https://console.anthropic.com/');
+      process.exit(1);
+    }
+    console.log('✅ ANTHROPIC_API_KEY is set');
+  } else if (provider === 'google') {
+    if (!process.env.GOOGLE_API_KEY && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      console.error('❌ Error: GOOGLE_API_KEY or GOOGLE_APPLICATION_CREDENTIALS environment variable is not set');
+      console.error('Please set your Google API key:');
+      console.error('  export GOOGLE_API_KEY="your-api-key-here"');
+      console.error('');
+      console.error('You can get an API key from: https://makersuite.google.com/app/apikey');
+      process.exit(1);
+    }
+    console.log('✅ Google API key is set');
+  } else {
+    // Default to OpenAI
+    if (!process.env.OPENAI_API_KEY) {
+      console.error('❌ Error: OPENAI_API_KEY environment variable is not set');
+      console.error('Please set your OpenAI API key:');
+      console.error('  export OPENAI_API_KEY="your-api-key-here"');
+      console.error('');
+      console.error('You can get an API key from: https://platform.openai.com/account/api-keys');
+      process.exit(1);
+    }
+    console.log('✅ OPENAI_API_KEY is set');
+  }
   
   // Configure working directory if specified
   const workingDir = process.env.WORKING_DIRECTORY;
@@ -175,11 +201,26 @@ class WebSocketAgentServer {
     this.pendingApprovalRequest = null;
     console.log('Creating new AgentLoop with fresh state');
     
+    // Determine provider from environment or auto-detect from model
+    const model = process.env.MODEL || 'codex-mini-latest';
+    const provider = (process.env.PROVIDER as 'openai' | 'anthropic' | 'google') || 
+                    AgentLoopFactory.detectProvider(model);
+    
+    // Choose the appropriate API key based on provider
+    let apiKey: string;
+    if (provider === 'anthropic') {
+      apiKey = process.env.ANTHROPIC_API_KEY || '';
+    } else if (provider === 'google') {
+      apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
+    } else {
+      apiKey = process.env.OPENAI_API_KEY || '';
+    }
+    
     // Default configuration - you can modify this based on your needs
     const config: AppConfig = {
-      model: process.env.MODEL || 'codex-mini-latest', // Use same default as TUI for better tool behavior
+      model, // Use same default as TUI for better tool behavior
       instructions: process.env.INSTRUCTIONS || '', // Allow instructions override via env
-      apiKey: process.env.OPENAI_API_KEY,
+      apiKey,
     };
 
     const approvalPolicy: ApprovalPolicy = 'suggest'; // Conservative by default
@@ -205,14 +246,10 @@ class WebSocketAgentServer {
       this.contextManager.clear();
     }
 
-    // Determine provider from environment or auto-detect from model
-    const provider = (process.env.PROVIDER as 'openai' | 'anthropic' | 'google') || 
-                    AgentLoopFactory.detectProvider(config.model || 'codex-mini-latest');
-    
-    console.log(`🤖 SERVER: Creating AgentLoop with provider: ${provider}, model: ${config.model || 'codex-mini-latest'}`);
+    console.log(`🤖 SERVER: Creating AgentLoop with provider: ${provider}, model: ${model}`);
     
     this.agentLoop = AgentLoopFactory.create({
-      model: config.model || 'codex-mini-latest',
+      model,
       provider,
       config,
       instructions: config.instructions,

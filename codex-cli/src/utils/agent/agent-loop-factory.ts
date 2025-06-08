@@ -29,12 +29,18 @@ export class AgentLoopFactory {
    * Create Claude/Anthropic-based agent loop
    */
   private static createClaude(config: FullAgentLoopConfig): IAgentLoop {
+    // Ensure API key is available in config for Claude
+    const claudeConfig = {
+      ...config.config,
+      apiKey: config.config?.apiKey || process.env.ANTHROPIC_API_KEY
+    };
+    
     return new ClaudeAgentLoop({
       model: config.model,
       instructions: config.instructions,
       approvalPolicy: config.approvalPolicy,
       disableResponseStorage: config.disableResponseStorage,
-      config: config.config,
+      config: claudeConfig,
       additionalWritableRoots: config.additionalWritableRoots,
       onItem: config.onItem,
       onLoading: config.onLoading,

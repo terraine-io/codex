@@ -122,25 +122,28 @@ export class ClaudeFormatConverter {
           // Convert function call to tool use format
           if (messages.length > 0 && messages[messages.length - 1]?.role === 'assistant') {
             const lastMessage = messages[messages.length - 1];
-            let args: Record<string, any> = {};
-            
-            try {
-              args = item.arguments ? JSON.parse(item.arguments) : {};
-            } catch (e) {
-              console.warn('Failed to parse function arguments:', item.arguments);
+            if (lastMessage) {
+              let args: Record<string, any> = {};
+              
+              try {
+                args = item.arguments ? JSON.parse(item.arguments) : {};
+              } catch (e) {
+                console.warn('Failed to parse function arguments:', item.arguments);
+              }
+              
+              lastMessage.content.push({
+                type: 'tool_use',
+                id: item.id || `call_${Date.now()}`,
+                name: item.name,
+                input: args
+              });
             }
-            
-            lastMessage.content.push({
-              type: 'tool_use',
-              id: item.id || `call_${Date.now()}`,
-              name: item.name,
-              input: args
-            });
           }
           break;
           
         case 'function_call_output':
           // Convert function output to tool result
+          // In Claude, tool results must be sent as user messages immediately after assistant tool use
           if (messages.length > 0) {
             const content: Array<ClaudeContent> = [{
               type: 'tool_result',
@@ -180,9 +183,11 @@ export class ClaudeFormatConverter {
             id: responseId,
             type: 'message',
             role: 'assistant',
+            status: 'completed',
             content: [{
-              type: 'input_text',
-              text: content.text
+              type: 'output_text',
+              text: content.text,
+              annotations: []
             }]
           };
           
@@ -209,9 +214,11 @@ export class ClaudeFormatConverter {
         id: responseId,
         type: 'message', 
         role: 'assistant',
+        status: 'completed',
         content: message.content.map(c => ({
-          type: 'input_text' as const,
-          text: (c as ClaudeTextContent).text
+          type: 'output_text' as const,
+          text: (c as ClaudeTextContent).text,
+          annotations: []
         }))
       };
     }

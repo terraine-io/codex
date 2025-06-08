@@ -8,10 +8,8 @@ import type { ApprovalPolicy } from "../../approvals.js";
 import type { AppConfig } from "../config.js";
 import {
   ClaudeFormatConverter,
-  type ClaudeMessage,
   type ClaudeCreateMessageRequest,
   type ClaudeCreateMessageResponse,
-  type ClaudeStreamEvent,
   type ClaudeContent,
   type ClaudeToolUseContent
 } from "./claude-types.js";
@@ -67,6 +65,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
   // Conversation state (when disableResponseStorage is true)
   private transcript: Array<ResponseInputItem> = [];
   
+  // Claude-specific conversation state for proper message pairing
+  private claudeMessages: Array<{ role: 'user' | 'assistant', content: any[] }> = [];
+  
   constructor(config: ClaudeAgentLoopConfig & AgentLoopCallbacks) {
     this.sessionId = randomUUID().replaceAll("-", "");
     
@@ -98,18 +99,21 @@ export class ClaudeAgentLoop implements IAgentLoop {
   private async initializeAnthropicClient(): Promise<void> {
     try {
       // Dynamic import to avoid requiring Anthropic SDK unless actually used
-      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const { default: Anthropic } = await import('@anthropic-ai/sdk') as any;
       
-      const apiKey = this.config.apiKey ?? process.env['ANTHROPIC_API_KEY'] ?? '';
+      // Let Anthropic SDK handle API key automatically from environment
+      // unless explicitly provided in config
+      const clientConfig: any = {};
       
-      if (!apiKey) {
-        throw new Error('ANTHROPIC_API_KEY is required for Claude models');
+      if (this.config.apiKey) {
+        console.log(`🔑 Using Claude API key from config: ${this.config.apiKey.substring(0, 10)}...`);
+        clientConfig.apiKey = this.config.apiKey;
+      } else {
+        console.log(`🔑 Using Claude API key from ANTHROPIC_API_KEY environment variable`);
+        // Let SDK use environment variable automatically
       }
       
-      this.anthropic = new Anthropic({
-        apiKey,
-        // Add timeout and other config as needed
-      });
+      this.anthropic = new Anthropic(clientConfig);
       
       log('Claude/Anthropic client initialized successfully');
       
@@ -131,7 +135,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
    */
   public async run(
     input: Array<ResponseInputItem>,
-    previousResponseId: string = ""
+    _previousResponseId: string = ""
   ): Promise<void> {
     if (this.terminated) {
       throw new Error("ClaudeAgentLoop has been terminated");
@@ -152,15 +156,40 @@ export class ClaudeAgentLoop implements IAgentLoop {
     try {
       this.onLoading(true);
       
-      // Update transcript if using local storage
+      // Handle input messages for Claude
       if (this.disableResponseStorage) {
+        // For Claude, we need to maintain proper message structure
+        // Add new user input to Claude messages
+        for (const item of input) {
+          if (item.type === 'message' && item.role === 'user') {
+            const content = item.content.map(c => ({
+              type: 'text' as const,
+              text: c.type === 'input_text' ? c.text : `[${c.type}]`
+            }));
+            
+            const userMessage = {
+              role: 'user' as const,
+              content
+            };
+            
+            this.claudeMessages.push(userMessage);
+            console.log(`\n👤 ADDED USER MESSAGE:`, JSON.stringify(userMessage, null, 2));
+          }
+        }
+        
+        // Also keep transcript for compatibility
         this.transcript.push(...input);
       }
       
-      // Convert input to Claude message format
-      const messages = ClaudeFormatConverter.convertInputToClaudeMessages(
-        this.disableResponseStorage ? this.transcript : input
-      );
+      // Use Claude messages directly instead of converting from transcript
+      const messages = this.disableResponseStorage ? this.claudeMessages : 
+        ClaudeFormatConverter.convertInputToClaudeMessages(input);
+      
+      console.log(`\n📋 FULL CONVERSATION STATE (${messages.length} messages):`);
+      messages.forEach((msg, i) => {
+        console.log(`\n  Message ${i} (${msg.role}):`);
+        console.log(`    content:`, JSON.stringify(msg.content, null, 4));
+      });
       
       // Prepare Claude API request
       const request: ClaudeCreateMessageRequest = {
@@ -172,7 +201,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
         ...(this.instructions ? { system: this.instructions } : {})
       };
       
-      log(`Claude request: ${JSON.stringify({ model: request.model, messageCount: messages.length, hasTools: !!request.tools })}`);
+      console.log(`\n🚀 CLAUDE REQUEST:`, JSON.stringify(request, null, 2));
       
       // Make streaming request to Claude
       const stream = this.anthropic.messages.stream(request);
@@ -190,7 +219,8 @@ export class ClaudeAgentLoop implements IAgentLoop {
           id: responseId,
           type: 'message',
           role: 'assistant',
-          content: [{ type: 'input_text', text }]
+          status: 'completed',
+          content: [{ type: 'output_text', text, annotations: [] }]
         });
       });
       
@@ -208,11 +238,32 @@ export class ClaudeAgentLoop implements IAgentLoop {
       stream.on('message', (message: ClaudeCreateMessageResponse) => {
         if (this.canceled || thisGeneration !== this.generation) return;
         
+        console.log(`\n📨 CLAUDE RESPONSE:`, JSON.stringify(message, null, 2));
+        
         responseId = message.id;
         
-        // Store response in transcript if using local storage
+        // Store response in Claude messages format for proper conversation flow
         if (this.disableResponseStorage) {
-          // Convert Claude response to ResponseInputItem format for transcript
+          // Replace or update the last assistant message to ensure we have the complete message
+          // with all tool uses included
+          const lastMessageIndex = this.claudeMessages.length - 1;
+          if (lastMessageIndex >= 0 && this.claudeMessages[lastMessageIndex].role === 'assistant') {
+            // Update existing assistant message with complete content
+            this.claudeMessages[lastMessageIndex] = {
+              role: 'assistant',
+              content: message.content
+            };
+          } else {
+            // Add new assistant message
+            this.claudeMessages.push({
+              role: 'assistant',
+              content: message.content
+            });
+          }
+          
+          console.log(`\n💾 UPDATED CLAUDE MESSAGES (${this.claudeMessages.length} total):`, JSON.stringify(this.claudeMessages, null, 2));
+          
+          // Also store in transcript for compatibility
           const responseItem: ResponseInputItem = {
             type: 'message',
             role: 'assistant',
@@ -237,7 +288,8 @@ export class ClaudeAgentLoop implements IAgentLoop {
       stream.on('error', (error: any) => {
         if (this.canceled || thisGeneration !== this.generation) return;
         
-        console.error('Claude stream error:', error);
+        console.error('\n❌ CLAUDE ERROR:', error);
+        console.error('Error details:', JSON.stringify(error, null, 2));
         this.onLoading(false);
         
         // Emit error as response item
@@ -245,9 +297,11 @@ export class ClaudeAgentLoop implements IAgentLoop {
           id: responseId,
           type: 'message',
           role: 'assistant',
+          status: 'incomplete',
           content: [{
-            type: 'input_text',
-            text: `Error: ${error.message || 'Unknown error occurred'}`
+            type: 'output_text',
+            text: `Error: ${error.message || 'Unknown error occurred'}`,
+            annotations: []
           }]
         });
       });
@@ -268,9 +322,11 @@ export class ClaudeAgentLoop implements IAgentLoop {
         id: `error_${Date.now()}`,
         type: 'message',
         role: 'assistant',
+        status: 'incomplete',
         content: [{
-          type: 'input_text',
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`
+          type: 'output_text',
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          annotations: []
         }]
       });
     }
@@ -306,12 +362,26 @@ export class ClaudeAgentLoop implements IAgentLoop {
         id: `output_${toolUse.id}`,
         type: 'function_call_output',
         call_id: toolUse.id,
-        output: result.content || '',
-        metadata: result.is_error ? { error: true } : {}
+        output: result.content || ''
       });
       
-      // Add tool result to transcript for next turn
+      // Add tool result to Claude messages for proper conversation flow
       if (this.disableResponseStorage) {
+        // Add tool result as user message (required by Claude)
+        const toolResultMessage = {
+          role: 'user' as const,
+          content: [{
+            type: 'tool_result' as const,
+            tool_use_id: toolUse.id,
+            content: result.content || ''
+          }]
+        };
+        
+        this.claudeMessages.push(toolResultMessage);
+        console.log(`\n🔧 ADDED TOOL RESULT:`, JSON.stringify(toolResultMessage, null, 2));
+        console.log(`\n💾 UPDATED CLAUDE MESSAGES AFTER TOOL (${this.claudeMessages.length} total):`, JSON.stringify(this.claudeMessages, null, 2));
+        
+        // Also add to transcript for compatibility
         this.transcript.push({
           type: 'function_call_output',
           call_id: toolUse.id,
@@ -327,8 +397,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
         id: `error_${toolUse.id}`,
         type: 'function_call_output',
         call_id: toolUse.id,
-        output: `Error: ${error instanceof Error ? error.message : String(error)}`,
-        metadata: { error: true }
+        output: `Error: ${error instanceof Error ? error.message : String(error)}`
       });
     }
   }

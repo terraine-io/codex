@@ -56,7 +56,7 @@ export async function executeClaudeTool(
   toolUse: ClaudeToolUseContent,
   context: ClaudeToolContext
 ): Promise<ClaudeToolResultContent> {
-  const { name, input, id } = toolUse;
+  const { name, id } = toolUse;
   
   try {
     switch (name) {
@@ -93,7 +93,7 @@ async function executeClaudeShellTool(
   const { input, id } = toolUse;
   
   // Validate input
-  if (!Array.isArray(input.command)) {
+  if (!Array.isArray(input['command'])) {
     return {
       type: "tool_result",
       tool_use_id: id,
@@ -102,9 +102,9 @@ async function executeClaudeShellTool(
     };
   }
   
-  const command = input.command as string[];
-  const workdir = input.workdir as string | undefined;
-  const timeout = input.timeout as number | undefined;
+  const command = input['command'] as string[];
+  const workdir = input['workdir'] as string | undefined;
+  const timeout = input['timeout'] as number | undefined;
   
   try {
     // Use the existing handleExecCommand function
@@ -114,10 +114,10 @@ async function executeClaudeShellTool(
         workdir,
         timeoutInMillis: timeout
       },
-      context.approvalPolicy,
-      context.getCommandConfirmation,
-      context.additionalWritableRoots,
       context.config,
+      context.approvalPolicy,
+      context.additionalWritableRoots,
+      context.getCommandConfirmation,
       context.abortSignal
     );
     

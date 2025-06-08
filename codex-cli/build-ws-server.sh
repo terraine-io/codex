@@ -19,11 +19,6 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # Build the WebSocket server if needed
-if [ ! -f "dist/ws-server.js" ] || [ "ws-server.ts" -nt "dist/ws-server.js" ]; then
-    echo "Building WebSocket server..."
-    node build-ws-server.mjs
-fi
+echo "Building WebSocket server..."
+node build-ws-server.mjs
 
-echo "Starting server on port 8080..."
-echo "Press Ctrl+C to stop the server"
-echo ""
