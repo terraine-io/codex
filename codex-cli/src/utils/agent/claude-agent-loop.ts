@@ -15,6 +15,7 @@ import {
   type ClaudeToolResultContent
 } from "./claude-types.js";
 import { getClaudeTools, executeClaudeTool, type ClaudeToolContext } from "./claude-tools.js";
+import { applyPatchToolInstructions } from "./apply-patch.js";
 import { randomUUID } from "crypto";
 import { log, debug, trace, isLevelEnabled, LogLevel } from "../logger/log.js";
 
@@ -280,6 +281,12 @@ export class ClaudeAgentLoop implements IAgentLoop {
       });
     }
 
+    // Prepare system instructions, including apply_patch instructions for Claude models
+    const systemInstructions = [
+      applyPatchToolInstructions, // Always include for Claude models
+      this.instructions
+    ].filter(Boolean).join('\n\n');
+
     // Prepare Claude API request
     const request: ClaudeCreateMessageRequest = {
       model: this.model,
@@ -287,7 +294,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
       messages,
       tools: getClaudeTools(),
       stream: true,
-      ...(this.instructions ? { system: this.instructions } : {})
+      ...(systemInstructions ? { system: systemInstructions } : {})
     };
 
     if (isLevelEnabled(LogLevel.TRACE)) {
