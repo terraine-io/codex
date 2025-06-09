@@ -31,19 +31,36 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
    
    **Option A: Using environment variables**
    ```bash
+   # For OpenAI (default provider)
    export OPENAI_API_KEY="your-api-key-here"
+   
+   # For Anthropic/Claude
+   export ANTHROPIC_API_KEY="your-anthropic-key-here"
+   export PROVIDER="anthropic"
+   export MODEL="claude-3-5-sonnet-20241022"
+   
+   # For Google/Gemini  
+   export GOOGLE_API_KEY="your-google-key-here"
+   export PROVIDER="google"
+   export MODEL="gemini-1.5-pro"
+   
    export WORKING_DIRECTORY="/path/to/your/project"  # Optional
    ```
    
    **Option B: Using a .env file (recommended)**
    ```bash
-   cp .env.example .env
+   cp ws-server.env.example .env
    # Edit .env with your configuration
    ```
    
    **Note**: The server will automatically:
    - Load variables from a `.env` file if present
-   - Check for `OPENAI_API_KEY` and exit with an error if not set
+   - Auto-detect the provider based on the model name, or use the `PROVIDER` environment variable
+   - Check for the appropriate API key based on provider:
+     - OpenAI: `OPENAI_API_KEY`
+     - Anthropic: `ANTHROPIC_API_KEY`
+     - Google: `GOOGLE_API_KEY` or `GOOGLE_APPLICATION_CREDENTIALS`
+   - Exit with an error if the required API key is not set
    - Change to `WORKING_DIRECTORY` if specified (can be relative or absolute path)
 
 3. Install WebSocket dependencies:
@@ -220,18 +237,41 @@ The server supports the following environment variables (can be set via `.env` f
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `OPENAI_API_KEY` | Yes | Your OpenAI API key | `sk-...` |
+| `OPENAI_API_KEY` | Conditional | Your OpenAI API key (required for OpenAI provider) | `sk-...` |
+| `ANTHROPIC_API_KEY` | Conditional | Your Anthropic API key (required for Anthropic provider) | `sk-ant-...` |
+| `GOOGLE_API_KEY` | Conditional | Your Google API key (required for Google provider) | `AIza...` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Conditional | Path to Google service account JSON (alternative to API key) | `/path/to/service-account.json` |
+| `PROVIDER` | No | AI provider to use | `openai`, `anthropic`, `google` |
+| `MODEL` | No | Model to use | `gpt-4`, `claude-3-5-sonnet-20241022`, `gemini-1.5-pro` |
+| `INSTRUCTIONS` | No | Custom system instructions for the AI | `You are a helpful coding assistant.` |
 | `WORKING_DIRECTORY` | No | Working directory for the server | `/path/to/project` |
+| `CONTEXT_STRATEGY` | No | Context management strategy | `threshold`, `dummy` |
+| `CONTEXT_COMPACTION_THRESHOLD` | No | Auto-compaction threshold (0.0-1.0) | `0.8` |
+| `LOG_LEVEL` | No | Logging level | `trace`, `debug`, `info`, `warn`, `error` |
 
 ### Code Configuration
 
 The server can also be customized by modifying the `AgentLoop` initialization in `ws-server.ts`:
 
 ```typescript
+// Provider is auto-detected from model name or set explicitly
+const model = process.env.MODEL || 'codex-mini-latest';
+const provider = process.env.PROVIDER || AgentLoopFactory.detectProvider(model);
+
+// API key is selected based on provider
+let apiKey: string;
+if (provider === 'anthropic') {
+  apiKey = process.env.ANTHROPIC_API_KEY || '';
+} else if (provider === 'google') {
+  apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
+} else {
+  apiKey = process.env.OPENAI_API_KEY || '';
+}
+
 const config: AppConfig = {
-  model: 'gpt-4', // or 'gpt-3.5-turbo', 'codex', etc.
-  instructions: 'Custom system instructions',
-  apiKey: process.env.OPENAI_API_KEY,
+  model,
+  instructions: process.env.INSTRUCTIONS || '',
+  apiKey,
 };
 
 const approvalPolicy: ApprovalPolicy = 'suggest'; // 'suggest', 'auto-edit', 'full-auto'

@@ -14,6 +14,7 @@ class AgentLoopClient {
     this.setupCLI();
     this.pendingApproval = null;
     this.suppressedItems = []; // Queue for items suppressed during approval
+    this.activeMessages = new Map(); // Track streaming messages by ID
   }
 
   setupWebSocket() {
@@ -131,9 +132,6 @@ class AgentLoopClient {
   }
 
   handleResponseItem(item) {
-    // Clear the current line and move cursor to beginning
-    process.stdout.write('\r\x1b[K');
-    
     // Suppress shell command display during pending approval
     if (this.pendingApproval && (item.type === 'local_shell_call' || item.type === 'local_shell_call_output')) {
       this.suppressedItems.push(item);
@@ -144,28 +142,13 @@ class AgentLoopClient {
     
     switch (item.type) {
       case 'message':
-        if (item.role === 'assistant') {
-          console.log('\n🤖 Assistant:');
-          if (Array.isArray(item.content)) {
-            item.content.forEach(content => {
-              console.log(content.text || content);
-            });
-          } else if (item.content) {
-            console.log(item.content);
-          }
-        } else if (item.role === 'system') {
-          console.log('\n⚙️  System:');
-          if (Array.isArray(item.content)) {
-            item.content.forEach(content => {
-              console.log(content.text || content);
-            });
-          } else if (item.content) {
-            console.log(item.content);
-          }
-        }
+        this.handleStreamingMessage(item);
         break;
 
       case 'function_call':
+        // Finalize any active assistant messages before showing tool call
+        this.finalizeActiveMessages();
+        
         console.log('\n🔧 Tool Call:');
         console.log(`Function: ${item.name}`);
         if (item.arguments) {
@@ -199,6 +182,11 @@ class AgentLoopClient {
         } catch {
           console.log(item.output);
         }
+        
+        // Show prompt after shell output if no pending approval
+        if (!this.pendingApproval) {
+          this.showPrompt();
+        }
         break;
 
       case 'function_call_output':
@@ -213,6 +201,11 @@ class AgentLoopClient {
           }
         } catch {
           console.log(item.output);
+        }
+        
+        // Show prompt after tool output if no pending approval
+        if (!this.pendingApproval) {
+          this.showPrompt();
         }
         break;
 
@@ -260,6 +253,64 @@ class AgentLoopClient {
     }
   }
 
+  finalizeActiveMessages() {
+    // Add newline after any active assistant messages that actually showed content
+    for (const [messageId, message] of this.activeMessages) {
+      if (message.role === 'assistant' && message.hasShownPrefix && message.text.trim()) {
+        console.log(''); // Add newline after assistant message
+      }
+    }
+    this.activeMessages.clear();
+  }
+
+  handleStreamingMessage(item) {
+    const messageId = item.id;
+    const role = item.role;
+    
+    // Extract text content from this chunk
+    let chunkText = '';
+    if (Array.isArray(item.content)) {
+      chunkText = item.content.map(content => content.text || content).join('');
+    } else if (item.content) {
+      chunkText = item.content;
+    }
+    
+    if (role === 'assistant') {
+      if (!this.activeMessages.has(messageId)) {
+        // First chunk for this message ID
+        this.activeMessages.set(messageId, { 
+          text: chunkText, 
+          role: 'assistant',
+          hasShownPrefix: false
+        });
+        
+        // Only show prefix if we have actual content
+        if (chunkText.trim()) {
+          console.log('\n🤖 Assistant:');
+          this.activeMessages.get(messageId).hasShownPrefix = true;
+          process.stdout.write(chunkText);
+        }
+      } else {
+        // Subsequent chunk for same message ID
+        const existing = this.activeMessages.get(messageId);
+        
+        // If we haven't shown prefix yet and now we have content, show it
+        if (!existing.hasShownPrefix && chunkText.trim()) {
+          console.log('\n🤖 Assistant:');
+          existing.hasShownPrefix = true;
+        }
+        
+        if (chunkText) {
+          process.stdout.write(chunkText);
+          existing.text += chunkText;
+        }
+      }
+    } else if (role === 'system') {
+      console.log('\n⚙️  System:');
+      console.log(chunkText);
+    }
+  }
+
   processSuppressedItems() {
     // Display any items that were suppressed during approval
     const items = this.suppressedItems;
@@ -274,10 +325,8 @@ class AgentLoopClient {
     if (payload.loading) {
       process.stdout.write('\r🔄 Thinking...');
     } else {
-      process.stdout.write('\r\x1b[K'); // Clear loading indicator
-      if (!this.pendingApproval) {
-        this.showPrompt();
-      }
+      process.stdout.write('\r\x1b[K'); // Clear thinking indicator
+      // Don't show prompt here - let handleAgentFinished do it
     }
   }
 
@@ -306,7 +355,9 @@ class AgentLoopClient {
   }
 
   handleAgentFinished(payload) {
-    process.stdout.write('\r\x1b[K');
+    // Finalize any active assistant messages
+    this.finalizeActiveMessages();
+    
     console.log('\n✅ Agent finished processing');
     console.log('Response ID:', payload.responseId);
     if (Object.keys(payload).length > 1) {

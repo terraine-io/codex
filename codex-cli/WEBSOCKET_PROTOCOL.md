@@ -88,7 +88,7 @@ interface ApprovalResponseMessage {
   id: string;
   type: "approval_response";
   payload: {
-    review: "YES" | "NO" | "NO_CONTINUE" | "ALWAYS" | "EXPLAIN";
+    review: "yes" | "no-exit" | "no-continue" | "always" | "explain";
     applyPatch?: ApplyPatchCommand;
     customDenyMessage?: string;
     explanation?: string;
@@ -221,10 +221,39 @@ interface ResponseItemMessage {
 }
 ```
 
-#### Reasoning (for models that support it)
+#### Local Shell Command
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440005",
+  "type": "response_item",
+  "payload": {
+    "id": "shell_abc123",
+    "type": "local_shell_call",
+    "action": {
+      "command": ["git", "status"]
+    },
+    "status": "completed"
+  }
+}
+```
+
+#### Local Shell Command Output
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440006",
+  "type": "response_item",
+  "payload": {
+    "id": "shell_output_abc123",
+    "type": "local_shell_call_output",
+    "output": "{\"output\": \"On branch main\\nnothing to commit, working tree clean\", \"metadata\": {\"exit_code\": 0, \"duration_seconds\": 0.1}}"
+  }
+}
+```
+
+#### Reasoning (for models that support it)
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440007",
   "type": "response_item",
   "payload": {
     "id": "reasoning_abc123",
@@ -243,7 +272,7 @@ interface ResponseItemMessage {
 #### System Message
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440006",
+  "id": "550e8400-e29b-41d4-a716-446655440008",
   "type": "response_item",
   "payload": {
     "id": "sys_abc123",
@@ -513,6 +542,100 @@ Server → Client: loading_state (loading: false)
 3. **Approval Flow**: Present approval requests to users with clear options
 4. **Error Handling**: Display errors gracefully and allow recovery
 5. **State Management**: Track conversation state and response IDs
+6. **Streaming Messages**: Handle streaming assistant messages by tracking message IDs and assembling chunks
+7. **Approval Suppression**: Suppress display of `local_shell_call` and `local_shell_call_output` items during pending approval states
+
+#### Message Streaming Implementation
+
+For streaming assistant messages, maintain state to properly assemble message chunks:
+
+```javascript
+class MessageStateManager {
+  constructor() {
+    this.activeMessages = new Map(); // Track by message ID
+  }
+  
+  handleStreamingMessage(item) {
+    const messageId = item.id;
+    const role = item.role;
+    
+    // Extract text content from this chunk
+    let chunkText = '';
+    if (Array.isArray(item.content)) {
+      chunkText = item.content.map(content => content.text || content).join('');
+    } else if (item.content) {
+      chunkText = item.content;
+    }
+    
+    if (role === 'assistant') {
+      if (!this.activeMessages.has(messageId)) {
+        // First chunk - show prefix only if we have content
+        this.activeMessages.set(messageId, { 
+          text: chunkText, 
+          role: 'assistant',
+          hasShownPrefix: false
+        });
+        
+        if (chunkText.trim()) {
+          this.showAssistantPrefix();
+          this.activeMessages.get(messageId).hasShownPrefix = true;
+          this.appendText(chunkText);
+        }
+      } else {
+        // Subsequent chunk
+        const existing = this.activeMessages.get(messageId);
+        
+        if (!existing.hasShownPrefix && chunkText.trim()) {
+          this.showAssistantPrefix();
+          existing.hasShownPrefix = true;
+        }
+        
+        if (chunkText) {
+          this.appendText(chunkText);
+          existing.text += chunkText;
+        }
+      }
+    }
+  }
+  
+  finalizeActiveMessages() {
+    // Add newline after completed assistant messages
+    for (const [messageId, message] of this.activeMessages) {
+      if (message.role === 'assistant' && message.hasShownPrefix && message.text.trim()) {
+        this.addNewline();
+      }
+    }
+    this.activeMessages.clear();
+  }
+}
+```
+
+#### Approval State Management
+
+Handle approval requests by suppressing shell command display:
+
+```javascript
+handleResponseItem(item) {
+  // Suppress shell commands during pending approval
+  if (this.pendingApproval && 
+      (item.type === 'local_shell_call' || item.type === 'local_shell_call_output')) {
+    this.suppressedItems.push(item);
+    return; // Don't display until approval is resolved
+  }
+  
+  // Normal processing...
+}
+
+processSuppressedItems() {
+  // Display suppressed items after approval
+  const items = this.suppressedItems;
+  this.suppressedItems = [];
+  
+  items.forEach(item => {
+    this.handleResponseItem(item);
+  });
+}
+```
 
 ### Connection Management
 
@@ -538,6 +661,18 @@ function isValidMessage(data: any): data is WSMessage {
 2. **User Feedback**: Always inform users of error states
 3. **Retry Logic**: Implement appropriate retry mechanisms
 4. **Logging**: Log errors for debugging and monitoring
+
+---
+
+## Provider Support
+
+The WebSocket server supports multiple AI providers:
+
+- **OpenAI**: GPT-4, GPT-3.5-turbo, and other OpenAI models
+- **Anthropic**: Claude 3.5 Sonnet, Claude 3 Opus, and other Claude models  
+- **Google**: Gemini 1.5 Pro, Gemini 1.5 Flash, and other Gemini models
+
+Provider selection is automatic based on model name, or can be explicitly set via the `PROVIDER` environment variable. Each provider requires its corresponding API key to be configured.
 
 ---
 

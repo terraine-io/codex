@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { WebSocketServer, WebSocket } from 'ws';
-import { AgentLoop, CommandConfirmation } from './src/utils/agent/agent-loop.js';
+import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
 import type { AppConfig } from './src/utils/config.js';
@@ -11,23 +11,50 @@ import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
 import { existsSync } from 'fs';
 import { resolve } from 'path';
+import { initLogger, debug } from './src/utils/logger/log.js';
 
 // Load environment variables and configure working directory
 function initializeEnvironment() {
   // Load .env file if it exists
   config();
   
-  // Check for required API key
-  if (!process.env.OPENAI_API_KEY) {
-    console.error('❌ Error: OPENAI_API_KEY environment variable is not set');
-    console.error('Please set your OpenAI API key:');
-    console.error('  export OPENAI_API_KEY="your-api-key-here"');
-    console.error('');
-    console.error('You can get an API key from: https://platform.openai.com/account/api-keys');
-    process.exit(1);
-  }
+  // Determine which provider will be used to check for appropriate API key
+  const model = process.env.MODEL || 'codex-mini-latest';
+  const provider = process.env.PROVIDER || AgentLoopFactory.detectProvider(model);
   
-  console.log('✅ OPENAI_API_KEY is set');
+  // Check for required API key based on provider
+  if (provider === 'anthropic') {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.error('❌ Error: ANTHROPIC_API_KEY environment variable is not set');
+      console.error('Please set your Anthropic API key:');
+      console.error('  export ANTHROPIC_API_KEY="your-api-key-here"');
+      console.error('');
+      console.error('You can get an API key from: https://console.anthropic.com/');
+      process.exit(1);
+    }
+    console.log('✅ ANTHROPIC_API_KEY is set');
+  } else if (provider === 'google') {
+    if (!process.env.GOOGLE_API_KEY && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      console.error('❌ Error: GOOGLE_API_KEY or GOOGLE_APPLICATION_CREDENTIALS environment variable is not set');
+      console.error('Please set your Google API key:');
+      console.error('  export GOOGLE_API_KEY="your-api-key-here"');
+      console.error('');
+      console.error('You can get an API key from: https://makersuite.google.com/app/apikey');
+      process.exit(1);
+    }
+    console.log('✅ Google API key is set');
+  } else {
+    // Default to OpenAI
+    if (!process.env.OPENAI_API_KEY) {
+      console.error('❌ Error: OPENAI_API_KEY environment variable is not set');
+      console.error('Please set your OpenAI API key:');
+      console.error('  export OPENAI_API_KEY="your-api-key-here"');
+      console.error('');
+      console.error('You can get an API key from: https://platform.openai.com/account/api-keys');
+      process.exit(1);
+    }
+    console.log('✅ OPENAI_API_KEY is set');
+  }
   
   // Configure working directory if specified
   const workingDir = process.env.WORKING_DIRECTORY;
@@ -117,7 +144,7 @@ interface ContextCompactedMessage extends WSMessage {
 
 class WebSocketAgentServer {
   private wss: WebSocketServer;
-  private agentLoop: AgentLoop | null = null;
+  private agentLoop: IAgentLoop | null = null;
   private ws: WebSocket | null = null;
   private contextManager: ContextManager | null = null;
   private pendingApprovalRequest: {
@@ -175,11 +202,26 @@ class WebSocketAgentServer {
     this.pendingApprovalRequest = null;
     console.log('Creating new AgentLoop with fresh state');
     
+    // Determine provider from environment or auto-detect from model
+    const model = process.env.MODEL || 'codex-mini-latest';
+    const provider = (process.env.PROVIDER as 'openai' | 'anthropic' | 'google') || 
+                    AgentLoopFactory.detectProvider(model);
+    
+    // Choose the appropriate API key based on provider
+    let apiKey: string;
+    if (provider === 'anthropic') {
+      apiKey = process.env.ANTHROPIC_API_KEY || '';
+    } else if (provider === 'google') {
+      apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
+    } else {
+      apiKey = process.env.OPENAI_API_KEY || '';
+    }
+    
     // Default configuration - you can modify this based on your needs
     const config: AppConfig = {
-      model: process.env.MODEL || 'codex-mini-latest', // Use same default as TUI for better tool behavior
+      model, // Use same default as TUI for better tool behavior
       instructions: process.env.INSTRUCTIONS || '', // Allow instructions override via env
-      apiKey: process.env.OPENAI_API_KEY,
+      apiKey,
     };
 
     const approvalPolicy: ApprovalPolicy = 'suggest'; // Conservative by default
@@ -205,9 +247,11 @@ class WebSocketAgentServer {
       this.contextManager.clear();
     }
 
-    this.agentLoop = new AgentLoop({
-      model: config.model || 'codex-mini-latest',
-      provider: 'openai',
+    console.log(`🤖 SERVER: Creating AgentLoop with provider: ${provider}, model: ${model}`);
+    
+    this.agentLoop = AgentLoopFactory.create({
+      model,
+      provider,
       config,
       instructions: config.instructions,
       approvalPolicy,
@@ -584,6 +628,13 @@ class WebSocketAgentServer {
 
 // Initialize environment and working directory before starting server
 initializeEnvironment();
+
+// Initialize logger and show current log level
+const logger = initLogger();
+if (logger.isLoggingEnabled()) {
+  const logLevel = process.env.LOG_LEVEL || process.env.DEBUG || 'none';
+  debug(`🐛 Logging enabled with level: ${logLevel.toUpperCase()}`);
+}
 
 // Example usage
 const server = new WebSocketAgentServer(8080);
