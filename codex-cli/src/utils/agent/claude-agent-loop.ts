@@ -413,6 +413,12 @@ export class ClaudeAgentLoop implements IAgentLoop {
           }
 
           log(`ClaudeAgentLoop: Turn completed with ${toolResults.length} tool results`);
+          // If no tool results, we should stop loading immediately to show input prompt
+
+          if (toolResults.length === 0) {
+            this.onLoading(false);
+          }
+
           resolve(toolResults);
         });
 
