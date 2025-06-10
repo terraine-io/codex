@@ -244,7 +244,14 @@ class WebSocketAgentServer {
   }
 
   private verifyClient(info: { origin: string; secure: boolean; req: any }): boolean {
-    const { origin } = info;
+    const { origin, req } = info;
+
+    // Validate WebSocket URL path format: /ws/{session_id}
+    const url = req.url;
+    if (!url || !this.validateWebSocketPath(url)) {
+      console.log(`❌ WebSocket connection rejected: Invalid path format '${url}'. Expected: /ws/{session_id}`);
+      return false;
+    }
 
     // Allow connections without origin (e.g., from non-browser clients like curl, Postman, etc.)
     if (!origin) {
@@ -261,6 +268,19 @@ class WebSocketAgentServer {
     console.log(`❌ WebSocket connection rejected from origin: ${origin}`);
     console.log(`   Allowed origins: ${Array.from(this.allowedOrigins).join(', ')}`);
     return false;
+  }
+
+  private validateWebSocketPath(url: string): boolean {
+    // Expected format: /ws/{session_id}
+    const pathPattern = /^\/ws\/([a-zA-Z0-9]+)$/;
+    return pathPattern.test(url);
+  }
+
+  private extractSessionIdFromPath(url: string): string | null {
+    // Extract session ID from /ws/{session_id} format
+    const pathPattern = /^\/ws\/([a-zA-Z0-9]+)$/;
+    const match = url.match(pathPattern);
+    return match ? match[1] : null;
   }
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -325,6 +345,9 @@ class WebSocketAgentServer {
 
     if (method === 'GET' && pathname === '/sessions') {
       this.handleGetSessions(req, res);
+    } else if (method === 'GET' && pathname.startsWith('/sessions/')) {
+      const sessionId = pathname.substring('/sessions/'.length);
+      this.handleGetSession(sessionId, req, res);
     } else if (method === 'GET' && pathname === '/artifacts') {
       this.handleGetArtifacts(req, res);
     } else {
@@ -339,6 +362,27 @@ class WebSocketAgentServer {
     } catch (error) {
       console.error('Error handling /sessions request:', error);
       this.sendHttpError(res, 500, 'Internal server error while loading sessions');
+    }
+  }
+
+  private handleGetSession(sessionId: string, req: IncomingMessage, res: ServerResponse): void {
+    try {
+      // Validate session ID format (should be alphanumeric)
+      if (!/^[a-zA-Z0-9]+$/.test(sessionId)) {
+        this.sendHttpError(res, 400, 'Invalid session ID format');
+        return;
+      }
+
+      const sessionData = this.loadSessionData(sessionId);
+      if (!sessionData) {
+        this.sendHttpError(res, 404, 'Session not found');
+        return;
+      }
+
+      this.sendJsonResponse(res, 200, sessionData);
+    } catch (error) {
+      console.error(`Error handling /sessions/${sessionId} request:`, error);
+      this.sendHttpError(res, 500, 'Internal server error while loading session');
     }
   }
 
@@ -396,6 +440,49 @@ class WebSocketAgentServer {
     } catch (error) {
       console.error('Error loading sessions list:', error);
       return [];
+    }
+  }
+
+  private loadSessionData(sessionId: string): { id: string; events: SessionEvent[] } | null {
+    if (!this.sessionStorePath) {
+      return null; // No session storage configured
+    }
+
+    try {
+      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
+      
+      if (!existsSync(sessionFile)) {
+        return null; // Session file not found
+      }
+
+      // Read the entire session file
+      const content = readFileSync(sessionFile, 'utf-8');
+      const lines = content.trim().split('\n').filter(line => line.length > 0);
+
+      if (lines.length === 0) {
+        return { id: sessionId, events: [] };
+      }
+
+      // Parse all events
+      const events: SessionEvent[] = [];
+      for (const line of lines) {
+        try {
+          const event: SessionEvent = JSON.parse(line);
+          events.push(event);
+        } catch (parseError) {
+          console.error(`Error parsing event in session ${sessionId}:`, parseError);
+          // Continue with other events instead of failing completely
+        }
+      }
+
+      return {
+        id: sessionId,
+        events
+      };
+
+    } catch (error) {
+      console.error(`Error loading session data for ${sessionId}:`, error);
+      return null;
     }
   }
 
@@ -481,6 +568,23 @@ class WebSocketAgentServer {
 
     this.logSessionEvent(sessionEvent);
     console.log(`🆔 Started new session: ${this.currentSessionId}`);
+  }
+
+  private startSessionWithId(sessionId: string): void {
+    if (!this.sessionStorePath) {
+      return; // Session logging not configured
+    }
+
+    this.currentSessionId = sessionId;
+    const sessionEvent: SessionEvent = {
+      timestamp: new Date().toISOString(),
+      event_type: 'websocket_message_received',
+      direction: 'incoming',
+      message_data: { event: 'session_connected', session_id: sessionId }
+    };
+
+    this.logSessionEvent(sessionEvent);
+    console.log(`🆔 Connected to session: ${this.currentSessionId}`);
   }
 
   private logSessionEvent(event: SessionEvent): void {
@@ -577,12 +681,20 @@ class WebSocketAgentServer {
   }
 
   private setupWebSocketServer() {
-    this.wss.on('connection', (ws) => {
-      console.log('Client connected - initializing new session');
+    this.wss.on('connection', (ws, req) => {
+      // Extract session ID from WebSocket path
+      const sessionId = this.extractSessionIdFromPath(req.url || '');
+      if (!sessionId) {
+        console.log('❌ WebSocket connection rejected: Could not extract session ID');
+        ws.close(1008, 'Invalid session ID in path');
+        return;
+      }
+
+      console.log(`Client connected to session: ${sessionId}`);
       this.ws = ws;
 
-      // Start new session for logging
-      this.startNewSession();
+      // Use the session ID from the URL path
+      this.startSessionWithId(sessionId);
 
       // Initialize AgentLoop when client connects
       this.initializeAgentLoop();
