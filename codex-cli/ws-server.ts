@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, IncomingMessage, ServerResponse } from 'http';
+import { URL } from 'url';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
@@ -17,11 +19,11 @@ import { initLogger, debug } from './src/utils/logger/log.js';
 function initializeEnvironment() {
   // Load .env file if it exists
   config();
-  
+
   // Determine which provider will be used to check for appropriate API key
   const model = process.env.MODEL || 'codex-mini-latest';
   const provider = process.env.PROVIDER || AgentLoopFactory.detectProvider(model);
-  
+
   // Check for required API key based on provider
   if (provider === 'anthropic') {
     if (!process.env.ANTHROPIC_API_KEY) {
@@ -55,18 +57,18 @@ function initializeEnvironment() {
     }
     console.log('✅ OPENAI_API_KEY is set');
   }
-  
+
   // Configure working directory if specified
   const workingDir = process.env.WORKING_DIRECTORY;
   if (workingDir) {
     const absolutePath = resolve(workingDir);
-    
+
     if (!existsSync(absolutePath)) {
       console.error(`❌ Error: Working directory does not exist: ${absolutePath}`);
       console.error('Please create the directory or update WORKING_DIRECTORY in your .env file');
       process.exit(1);
     }
-    
+
     try {
       process.chdir(absolutePath);
       console.log(`✅ Changed working directory to: ${absolutePath}`);
@@ -144,6 +146,7 @@ interface ContextCompactedMessage extends WSMessage {
 
 class WebSocketAgentServer {
   private wss: WebSocketServer;
+  private httpServer: ReturnType<typeof createServer>;
   private agentLoop: IAgentLoop | null = null;
   private ws: WebSocket | null = null;
   private contextManager: ContextManager | null = null;
@@ -153,12 +156,160 @@ class WebSocketAgentServer {
     command: Array<string>;
     applyPatch?: ApplyPatchCommand;
   } | null = null;
+  private allowedOrigins: Set<string>;
   // Note: lastResponseId is not needed when disableResponseStorage: true
 
   constructor(port: number = 8080) {
-    this.wss = new WebSocketServer({ port });
+    // Parse allowed origins from environment variable
+    this.allowedOrigins = this.parseAllowedOrigins();
+
+    // Create HTTP server first
+    this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
+
+    // Create WebSocket server using the HTTP server
+    this.wss = new WebSocketServer({
+      server: this.httpServer,
+      verifyClient: (info) => this.verifyClient(info)
+    });
+
     this.setupWebSocketServer();
-    console.log(`WebSocket server started on port ${port}`);
+
+    // Start the HTTP server
+    this.httpServer.listen(port, () => {
+      console.log(`HTTP/WebSocket server started on port ${port}`);
+      console.log(`✅ CORS origin validation enabled for: ${Array.from(this.allowedOrigins).join(', ')}`);
+    });
+  }
+
+  private parseAllowedOrigins(): Set<string> {
+    const allowedOriginsEnv = process.env.ALLOWED_ORIGINS;
+
+    if (!allowedOriginsEnv || allowedOriginsEnv.trim() === '') {
+      // Default to localhost:8081 for security
+      return new Set(['http://localhost:8081']);
+    }
+
+    // Split by comma and trim whitespace
+    const origins = allowedOriginsEnv
+      .split(',')
+      .map(origin => origin.trim())
+      .filter(origin => origin.length > 0);
+
+    if (origins.length === 0) {
+      // Default to localhost:8081 for security
+      return new Set(['http://localhost:8081']);
+    }
+
+    return new Set(origins);
+  }
+
+  private verifyClient(info: { origin: string; secure: boolean; req: any }): boolean {
+    const { origin } = info;
+
+    // Allow connections without origin (e.g., from non-browser clients like curl, Postman, etc.)
+    if (!origin) {
+      console.log('🔓 WebSocket connection allowed: No origin header (likely non-browser client)');
+      return true;
+    }
+
+    // Check if the origin is in the allowed list
+    if (this.allowedOrigins.has(origin)) {
+      console.log(`✅ WebSocket connection allowed from origin: ${origin}`);
+      return true;
+    }
+
+    console.log(`❌ WebSocket connection rejected from origin: ${origin}`);
+    console.log(`   Allowed origins: ${Array.from(this.allowedOrigins).join(', ')}`);
+    return false;
+  }
+
+  private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
+    console.log(`🌐 Incoming HTTP request: ${req.method} ${req.url}`);
+    console.log(`   Headers: ${JSON.stringify(req.headers, null, 2)}`);
+
+    // Check if this is a WebSocket upgrade request - if so, let the WebSocket server handle it
+    if (req.headers.upgrade === 'websocket') {
+      console.log('⬆️  WebSocket upgrade request detected, skipping HTTP handling');
+      return; // Let the WebSocket server handle this
+    }
+
+    const origin = req.headers.origin;
+
+    // Set CORS headers
+    this.setCorsHeaders(res, origin);
+
+    // Handle preflight OPTIONS requests
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+
+    // Parse URL and route to appropriate handler
+    if (!req.url) {
+      this.sendHttpError(res, 400, 'Bad Request: No URL provided');
+      return;
+    }
+
+    try {
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      this.routeHttpRequest(req.method || 'GET', url.pathname, req, res);
+    } catch (error) {
+      console.error('Error parsing URL:', error);
+      this.sendHttpError(res, 400, 'Bad Request: Invalid URL');
+    }
+  }
+
+  private setCorsHeaders(res: ServerResponse, origin?: string): void {
+    // Check if origin is allowed (same logic as WebSocket)
+    if (origin && this.allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      console.log(`✅ HTTP CORS allowed for origin: ${origin}`);
+    } else if (!origin) {
+      // Allow non-browser clients (no origin header)
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      console.log('🔓 HTTP request allowed: No origin header (likely non-browser client)');
+    } else {
+      // Origin not allowed - don't set CORS headers
+      console.log(`❌ HTTP CORS rejected for origin: ${origin}`);
+      console.log(`   Allowed origins: ${Array.from(this.allowedOrigins).join(', ')}`);
+    }
+
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '86400'); // Cache preflight for 24 hours
+  }
+
+  private routeHttpRequest(method: string, pathname: string, req: IncomingMessage, res: ServerResponse): void {
+    console.log(`📡 HTTP ${method} ${pathname}`);
+
+    if (method === 'GET' && pathname === '/sessions') {
+      this.handleGetSessions(req, res);
+    } else if (method === 'GET' && pathname === '/artifacts') {
+      this.handleGetArtifacts(req, res);
+    } else {
+      this.sendHttpError(res, 404, 'Not Found');
+    }
+  }
+
+  private handleGetSessions(req: IncomingMessage, res: ServerResponse): void {
+    const sessions: any[] = []; // Empty list for now
+    this.sendJsonResponse(res, 200, { sessions });
+  }
+
+  private handleGetArtifacts(req: IncomingMessage, res: ServerResponse): void {
+    const artifacts: any[] = []; // Empty list for now
+    this.sendJsonResponse(res, 200, { artifacts });
+  }
+
+  private sendJsonResponse(res: ServerResponse, statusCode: number, data: any): void {
+    res.setHeader('Content-Type', 'application/json');
+    res.writeHead(statusCode);
+    res.end(JSON.stringify(data, null, 2));
+  }
+
+  private sendHttpError(res: ServerResponse, statusCode: number, message: string): void {
+    this.sendJsonResponse(res, statusCode, { error: message });
   }
 
   private setupWebSocketServer() {
@@ -197,16 +348,16 @@ class WebSocketAgentServer {
       console.log('Terminating existing AgentLoop');
       this.agentLoop.terminate();
     }
-    
+
     // Reset all session state for new client
     this.pendingApprovalRequest = null;
     console.log('Creating new AgentLoop with fresh state');
-    
+
     // Determine provider from environment or auto-detect from model
     const model = process.env.MODEL || 'codex-mini-latest';
-    const provider = (process.env.PROVIDER as 'openai' | 'anthropic' | 'google') || 
+    const provider = (process.env.PROVIDER as 'openai' | 'anthropic' | 'google') ||
                     AgentLoopFactory.detectProvider(model);
-    
+
     // Choose the appropriate API key based on provider
     let apiKey: string;
     if (provider === 'anthropic') {
@@ -216,7 +367,7 @@ class WebSocketAgentServer {
     } else {
       apiKey = process.env.OPENAI_API_KEY || '';
     }
-    
+
     // Default configuration - you can modify this based on your needs
     const config: AppConfig = {
       model, // Use same default as TUI for better tool behavior
@@ -235,7 +386,7 @@ class WebSocketAgentServer {
         compactionThreshold: parseFloat(process.env.CONTEXT_COMPACTION_THRESHOLD || '0.8'),
         config
       });
-      
+
       console.log(`Using context management strategy: ${this.contextManager.getStrategyName()}`);
 
       // Set up auto-compaction callback
@@ -248,7 +399,7 @@ class WebSocketAgentServer {
     }
 
     console.log(`🤖 SERVER: Creating AgentLoop with provider: ${provider}, model: ${model}`);
-    
+
     this.agentLoop = AgentLoopFactory.create({
       model,
       provider,
@@ -257,14 +408,14 @@ class WebSocketAgentServer {
       approvalPolicy,
       additionalWritableRoots: [process.cwd()],
       disableResponseStorage: true,
-      
+
       // Callback for streaming response items back to client
       onItem: (item: ResponseItem) => {
         console.log(`📨 SERVER: Received response item type: ${item.type}${item.type === 'local_shell_call' ? ` (command: ${(item as any).action?.command?.join(' ')})` : ''}`);
-        
+
         // Add to context manager first for tracking
         this.contextManager?.addItem(item);
-        
+
         console.log(`📤 SERVER: Sending response item to client: ${item.type}`);
         // Then send to client
         this.sendMessage({
@@ -316,7 +467,7 @@ class WebSocketAgentServer {
       onLastResponseId: (responseId: string) => {
         // Send context info with agent finished message
         const contextInfo = this.contextManager?.getContextInfo();
-        
+
         this.sendMessage({
           id: randomUUID(),
           type: 'agent_finished',
@@ -350,7 +501,7 @@ class WebSocketAgentServer {
       case 'user_input':
         await this.handleUserInput(message as UserInputMessage);
         break;
-        
+
       case 'approval_response':
         await this.handleApprovalResponse(message as ApprovalResponseMessage);
         break;
@@ -362,7 +513,7 @@ class WebSocketAgentServer {
       case 'manual_compact':
         await this.handleManualCompaction();
         break;
-        
+
       default:
         this.sendError(`Unknown message type: ${message.type}`);
     }
@@ -376,20 +527,20 @@ class WebSocketAgentServer {
 
     try {
       const { input } = message.payload;
-      
+
       // Add user input to context manager for tracking
       this.contextManager.addUserInput(input);
-      
+
       // Check if we're approaching context limits before processing
       const contextInfo = this.contextManager.getContextInfo();
       if (contextInfo.usagePercent > 90) {
         console.log(`Context usage high (${contextInfo.usagePercent.toFixed(1)}%), considering auto-compaction`);
       }
-      
+
       // Since we're using disableResponseStorage: true, we don't need previousResponseId
       // Each request is self-contained and doesn't rely on server-side conversation state
       await this.agentLoop.run(input);
-      
+
     } catch (error) {
       console.error('Error running AgentLoop:', error);
       this.sendError('Failed to process user input', error);
@@ -404,15 +555,15 @@ class WebSocketAgentServer {
 
     try {
       console.log(`✅ SERVER: Received approval response: ${message.payload.review}`);
-      
+
       // Handle explanation request specially
       if (message.payload.review === 'explain') {
         console.log(`🤔 SERVER: Handling explanation request`);
-        
+
         try {
           // Generate explanation using AI model
           const explanation = await this.generateCommandExplanation(this.pendingApprovalRequest.command);
-          
+
           // Send explanation message back to client
           this.sendMessage({
             id: randomUUID(),
@@ -427,7 +578,7 @@ class WebSocketAgentServer {
               }]
             }
           });
-          
+
         } catch (error) {
           console.error('Failed to generate explanation:', error);
           this.sendMessage({
@@ -444,7 +595,7 @@ class WebSocketAgentServer {
             }
           });
         }
-        
+
         // Send a new approval request (don't resolve the promise yet)
         this.sendMessage({
           id: randomUUID(),
@@ -454,17 +605,17 @@ class WebSocketAgentServer {
             applyPatch: this.pendingApprovalRequest.applyPatch,
           },
         });
-        
+
         console.log(`📤 SERVER: Sent explanation and renewed approval request`);
         return; // Don't resolve the approval yet
       }
-      
+
       console.log(`🚀 SERVER: Resolving approval promise - command can now execute`);
-      
+
       // Resolve the pending approval request with the user's decision
       this.pendingApprovalRequest.resolve(message.payload);
       this.pendingApprovalRequest = null;
-      
+
       console.log(`📝 SERVER: Approval resolved, AgentLoop should continue execution`);
     } catch (error) {
       console.error('Error handling approval response:', error);
@@ -494,21 +645,21 @@ class WebSocketAgentServer {
 
     try {
       console.log('🗜️ Performing automatic context compaction...');
-      
+
       const oldTokenCount = this.contextManager.getTokenCount();
-      
+
       // Generate compacted summary
       const summaryItem = await this.contextManager.compact();
-      
+
       // Get seed input for new AgentLoop
       const seedInput = this.contextManager.getCompactedSeedInput();
-      
+
       // Recreate AgentLoop with compacted context
       this.initializeAgentLoop(seedInput);
-      
+
       const newTokenCount = this.contextManager.getTokenCount();
       const reductionPercent = ((oldTokenCount - newTokenCount) / oldTokenCount) * 100;
-      
+
       // Notify client about successful compaction
       this.sendMessage({
         id: randomUUID(),
@@ -520,12 +671,12 @@ class WebSocketAgentServer {
           strategy: this.contextManager.getStrategyName()
         }
       });
-      
+
       console.log(`✅ Context compacted: ${oldTokenCount} → ${newTokenCount} tokens (${reductionPercent.toFixed(1)}% reduction)`);
-      
+
     } catch (error) {
       console.error('❌ Auto-compaction failed:', error);
-      
+
       // Send error to client
       this.sendError('Automatic context compaction failed', {
         error: error.message,
@@ -556,7 +707,7 @@ class WebSocketAgentServer {
   private async generateCommandExplanation(command: Array<string>): Promise<string> {
     try {
       console.log(`🤖 SERVER: Generating explanation for command: ${command.join(' ')}`);
-      
+
       // Create OpenAI client (reuse the same configuration as AgentLoop)
       const OpenAI = (await import('openai')).default;
       const oai = new OpenAI({
@@ -564,7 +715,7 @@ class WebSocketAgentServer {
         timeout: 30000, // 30 second timeout for explanation
       });
 
-      // Format the command for display  
+      // Format the command for display
       const commandForDisplay = command.join(' ');
 
       // Create explanation request (same prompt as TUI)
@@ -585,7 +736,7 @@ class WebSocketAgentServer {
       const explanation = response.choices[0]?.message.content || 'Unable to generate explanation.';
       console.log(`✅ SERVER: Generated explanation (${explanation.length} chars)`);
       return explanation;
-      
+
     } catch (error) {
       console.error('❌ SERVER: Error generating command explanation:', error);
       throw error;
@@ -597,23 +748,24 @@ class WebSocketAgentServer {
       this.agentLoop.terminate();
       this.agentLoop = null;
     }
-    
+
     if (this.contextManager) {
       this.contextManager.clear();
       this.contextManager = null;
     }
-    
+
     if (this.pendingApprovalRequest) {
       this.pendingApprovalRequest.reject(new Error('Connection closed'));
       this.pendingApprovalRequest = null;
     }
-    
+
     this.ws = null;
   }
 
   public close() {
     this.cleanup();
     this.wss.close();
+    this.httpServer.close();
   }
 
   // Public methods for monitoring and control
