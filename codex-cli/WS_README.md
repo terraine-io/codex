@@ -501,13 +501,51 @@ The server provides REST endpoints for accessing session data:
 {
   "sessions": [
     {
-      "session_id": "a1b2c3d4e5f6789012345678901234567890abcd",
+      "id": "a1b2c3d4e5f6789012345678901234567890abcd",
       "start_time": "2025-01-09T12:34:56.789Z",
-      "last_activity": "2025-01-09T12:45:30.123Z",
+      "last_update_time": "2025-01-09T12:45:30.123Z",
       "event_count": 42
     }
   ]
 }
+```
+
+**POST /sessions** - Create a new session
+- Creates a new empty session with a generated ID
+- Returns `201 Created` with session info
+```json
+{
+  "id": "b2c3d4e5f6g7890123456789012345678901bcde",
+  "start_time": "2025-01-09T13:00:00.000Z",
+  "last_update_time": "2025-01-09T13:00:00.000Z", 
+  "event_count": 1
+}
+```
+
+**GET /sessions/{sessionId}** - Get session data
+- Returns full session data including all events
+- Returns `404 Not Found` if session doesn't exist
+
+**DELETE /sessions/{sessionId}** - Delete a session
+- Permanently deletes the session file
+- Returns `204 No Content` on success
+- Returns `404 Not Found` if session doesn't exist
+- Returns `409 Conflict` if trying to delete an active session
+
+#### REST API Usage Examples
+
+```bash
+# Create a new session
+curl -X POST http://localhost:8080/sessions
+
+# List all sessions
+curl http://localhost:8080/sessions
+
+# Get specific session data
+curl http://localhost:8080/sessions/a1b2c3d4e5f6789012345678901234567890abcd
+
+# Delete a session
+curl -X DELETE http://localhost:8080/sessions/a1b2c3d4e5f6789012345678901234567890abcd
 ```
 
 ## Development

@@ -3,7 +3,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
-import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync } from 'fs';
 import { basename, join } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
@@ -284,7 +284,6 @@ class WebSocketAgentServer {
 
   private handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
     console.log(`🌐 Incoming HTTP request: ${req.method} ${req.url}`);
-    console.log(`   Headers: ${JSON.stringify(req.headers, null, 2)}`);
 
     // Check if this is a WebSocket upgrade request - if so, let the WebSocket server handle it
     if (req.headers.upgrade === 'websocket') {
@@ -344,9 +343,14 @@ class WebSocketAgentServer {
 
     if (method === 'GET' && pathname === '/sessions') {
       this.handleGetSessions(req, res);
+    } else if (method === 'POST' && pathname === '/sessions') {
+      this.handleCreateSession(req, res);
     } else if (method === 'GET' && pathname.startsWith('/sessions/')) {
       const sessionId = pathname.substring('/sessions/'.length);
       this.handleGetSession(sessionId, req, res);
+    } else if (method === 'DELETE' && pathname.startsWith('/sessions/')) {
+      const sessionId = pathname.substring('/sessions/'.length);
+      this.handleDeleteSession(sessionId, req, res);
     } else if (method === 'GET' && pathname === '/artifacts') {
       this.handleGetArtifacts(req, res);
     } else {
@@ -482,6 +486,89 @@ class WebSocketAgentServer {
     } catch (error) {
       console.error(`Error loading session data for ${sessionId}:`, error);
       return null;
+    }
+  }
+
+  private handleCreateSession(req: IncomingMessage, res: ServerResponse): void {
+    try {
+      if (!this.sessionStorePath) {
+        this.sendHttpError(res, 503, 'Session storage not configured');
+        return;
+      }
+
+      // Generate new session ID
+      const sessionId = this.generateSessionId();
+      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
+
+      // Create initial session event
+      const sessionEvent: SessionEvent = {
+        timestamp: new Date().toISOString(),
+        event_type: 'websocket_message_received',
+        direction: 'incoming',
+        message_data: { event: 'session_created_via_api' }
+      };
+
+      // Write initial event to session file
+      const eventLine = JSON.stringify(sessionEvent) + '\n';
+      appendFileSync(sessionFile, eventLine);
+
+      console.log(`✅ Created new session via API: ${sessionId}`);
+
+      // Return session info
+      const sessionInfo: SessionInfo = {
+        id: sessionId,
+        start_time: sessionEvent.timestamp,
+        last_update_time: sessionEvent.timestamp,
+        event_count: 1
+      };
+
+      this.sendJsonResponse(res, 201, sessionInfo);
+
+    } catch (error) {
+      console.error('Error creating session:', error);
+      this.sendHttpError(res, 500, 'Internal server error while creating session');
+    }
+  }
+
+  private handleDeleteSession(sessionId: string, req: IncomingMessage, res: ServerResponse): void {
+    try {
+      // Validate session ID format
+      if (!/^[a-zA-Z0-9]+$/.test(sessionId)) {
+        this.sendHttpError(res, 400, 'Invalid session ID format');
+        return;
+      }
+
+      if (!this.sessionStorePath) {
+        this.sendHttpError(res, 503, 'Session storage not configured');
+        return;
+      }
+
+      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
+
+      // Check if session exists
+      if (!existsSync(sessionFile)) {
+        this.sendHttpError(res, 404, 'Session not found');
+        return;
+      }
+
+      // Prevent deletion of active session
+      if (this.currentSessionId === sessionId) {
+        this.sendHttpError(res, 409, 'Cannot delete active session');
+        return;
+      }
+
+      // Delete the session file
+      unlinkSync(sessionFile);
+
+      console.log(`🗑️  Deleted session via API: ${sessionId}`);
+
+      // Return success with no content
+      res.writeHead(204);
+      res.end();
+
+    } catch (error) {
+      console.error(`Error deleting session ${sessionId}:`, error);
+      this.sendHttpError(res, 500, 'Internal server error while deleting session');
     }
   }
 
