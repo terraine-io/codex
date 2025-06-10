@@ -654,7 +654,7 @@ class WebSocketAgentServer {
         }
       }
 
-      // Process response items (assistant messages, tool calls, etc.)
+      // Process response items (assistant messages, tool calls, explanation messages, etc.)
       if (event.event_type === 'websocket_message_sent' && 
           event.message_data?.type === 'response_item') {
         const responseItem = event.message_data.payload;
@@ -1215,16 +1215,24 @@ class WebSocketAgentServer {
       // Skip logging individual message fragments to avoid duplicate entries.
       // Message fragments are collected and logged as complete messages when
       // the conversation turn ends (see logCollectedTurnFragments).
+      // However, standalone explanation messages should be logged immediately.
       // Non-message items (function calls, loading states, etc.) are logged immediately.
-      const shouldLogFragment = message.type === 'response_item' &&
-                                 message.payload?.type === 'message';
+      const isStreamingFragment = message.type === 'response_item' &&
+                                   message.payload?.type === 'message' &&
+                                   this.isStreamingResponse();
 
-      if (!shouldLogFragment) {
+      if (!isStreamingFragment) {
         this.logOutgoingMessage(message);
       }
 
       this.ws.send(JSON.stringify(message));
     }
+  }
+
+  private isStreamingResponse(): boolean {
+    // Explanation messages are sent during approval handling, not during streaming responses
+    // We can detect this by checking if we have a pending approval request
+    return this.pendingApprovalRequest === null;
   }
 
   private sendError(message: string, details?: any) {
