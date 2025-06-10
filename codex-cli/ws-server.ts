@@ -3,8 +3,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
-import { readFileSync, existsSync } from 'fs';
-import { basename } from 'path';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync } from 'fs';
+import { basename, join } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
@@ -157,6 +157,21 @@ interface ArtifactsIndex {
   artifacts: ArtifactItem[];
 }
 
+// Types for session management
+interface SessionEvent {
+  timestamp: string;
+  event_type: 'websocket_message_received' | 'websocket_message_sent';
+  direction: 'incoming' | 'outgoing';
+  message_data: any;
+}
+
+interface SessionInfo {
+  session_id: string;
+  start_time: string;
+  last_activity: string;
+  event_count: number;
+}
+
 class WebSocketAgentServer {
   private wss: WebSocketServer;
   private httpServer: ReturnType<typeof createServer>;
@@ -170,11 +185,16 @@ class WebSocketAgentServer {
     applyPatch?: ApplyPatchCommand;
   } | null = null;
   private allowedOrigins: Set<string>;
+  private currentSessionId: string | null = null;
+  private sessionStorePath: string | null = null;
   // Note: lastResponseId is not needed when disableResponseStorage: true
 
   constructor(port: number = 8080) {
     // Parse allowed origins from environment variable
     this.allowedOrigins = this.parseAllowedOrigins();
+
+    // Initialize session storage
+    this.initializeSessionStorage();
 
     // Create HTTP server first
     this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
@@ -306,33 +326,95 @@ class WebSocketAgentServer {
   }
 
   private handleGetSessions(req: IncomingMessage, res: ServerResponse): void {
-    const sessions: any[] = []; // Empty list for now
-    this.sendJsonResponse(res, 200, { sessions });
+    try {
+      const sessions = this.loadSessionsList();
+      this.sendJsonResponse(res, 200, { sessions });
+    } catch (error) {
+      console.error('Error handling /sessions request:', error);
+      this.sendHttpError(res, 500, 'Internal server error while loading sessions');
+    }
+  }
+
+  private loadSessionsList(): SessionInfo[] {
+    if (!this.sessionStorePath) {
+      return []; // No session storage configured
+    }
+
+    try {
+      if (!existsSync(this.sessionStorePath)) {
+        return [];
+      }
+
+      const files = readdirSync(this.sessionStorePath);
+      const sessionFiles = files.filter(file => file.endsWith('.jsonl'));
+
+      const sessions: SessionInfo[] = [];
+
+      for (const file of sessionFiles) {
+        try {
+          const sessionId = file.replace('.jsonl', '');
+          const filePath = join(this.sessionStorePath, file);
+          const stats = statSync(filePath);
+
+          // Read first and last lines to get start time and event count
+          const content = readFileSync(filePath, 'utf-8');
+          const lines = content.trim().split('\n').filter(line => line.length > 0);
+
+          if (lines.length === 0) {
+            continue; // Skip empty files
+          }
+
+          const firstEvent: SessionEvent = JSON.parse(lines[0]);
+          const lastEvent: SessionEvent = JSON.parse(lines[lines.length - 1]);
+
+          const sessionInfo: SessionInfo = {
+            session_id: sessionId,
+            start_time: firstEvent.timestamp,
+            last_activity: lastEvent.timestamp,
+            event_count: lines.length
+          };
+
+          sessions.push(sessionInfo);
+        } catch (error) {
+          console.error(`Error processing session file ${file}:`, error.message);
+          // Continue with other files
+        }
+      }
+
+      // Sort by start time (newest first)
+      sessions.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime());
+
+      return sessions;
+
+    } catch (error) {
+      console.error('Error loading sessions list:', error);
+      return [];
+    }
   }
 
   private handleGetArtifacts(req: IncomingMessage, res: ServerResponse): void {
     try {
       const artifactsIndex = this.loadArtifactsIndex();
-      
+
       if (!artifactsIndex) {
         // Return empty list if no index file is configured or available
         this.sendJsonResponse(res, 200, { artifacts: [] });
         return;
       }
-      
+
       // Add relative_file_path to each artifact and rename overview to overview_md
       const enrichedArtifacts = artifactsIndex.artifacts.map(artifact => ({
         file_path: artifact.file_path,
         overview_md: artifact.overview,
         relative_file_path: basename(artifact.file_path)
       }));
-      
+
       // Return the artifacts from the index file
-      this.sendJsonResponse(res, 200, { 
+      this.sendJsonResponse(res, 200, {
         artifacts: enrichedArtifacts,
         artifacts_root_path: artifactsIndex.artifacts_root_path
       });
-      
+
     } catch (error) {
       console.error('Error handling /artifacts request:', error);
       this.sendHttpError(res, 500, 'Internal server error while loading artifacts');
@@ -349,32 +431,138 @@ class WebSocketAgentServer {
     this.sendJsonResponse(res, statusCode, { error: message });
   }
 
+  private initializeSessionStorage(): void {
+    const sessionStorePath = process.env.SESSION_STORE_PATH;
+
+    if (!sessionStorePath) {
+      console.log('⚠️  SESSION_STORE_PATH not configured, session logging disabled');
+      return;
+    }
+
+    try {
+      // Create directory if it doesn't exist
+      if (!existsSync(sessionStorePath)) {
+        mkdirSync(sessionStorePath, { recursive: true });
+        console.log(`📁 Created session store directory: ${sessionStorePath}`);
+      }
+
+      this.sessionStorePath = sessionStorePath;
+      console.log(`✅ Session logging enabled, storing in: ${sessionStorePath}`);
+
+    } catch (error) {
+      console.error(`❌ Failed to initialize session storage: ${error.message}`);
+      this.sessionStorePath = null;
+    }
+  }
+
+  private generateSessionId(): string {
+    return randomUUID().replace(/-/g, '');
+  }
+
+  private startNewSession(): void {
+    if (!this.sessionStorePath) {
+      return; // Session logging not configured
+    }
+
+    this.currentSessionId = this.generateSessionId();
+    const sessionEvent: SessionEvent = {
+      timestamp: new Date().toISOString(),
+      event_type: 'websocket_message_received',
+      direction: 'incoming',
+      message_data: { event: 'session_started' }
+    };
+
+    this.logSessionEvent(sessionEvent);
+    console.log(`🆔 Started new session: ${this.currentSessionId}`);
+  }
+
+  private logSessionEvent(event: SessionEvent): void {
+    if (!this.sessionStorePath || !this.currentSessionId) {
+      return;
+    }
+
+    try {
+      const sessionFile = join(this.sessionStorePath, `${this.currentSessionId}.jsonl`);
+      const eventLine = JSON.stringify(event) + '\n';
+      appendFileSync(sessionFile, eventLine);
+    } catch (error) {
+      console.error(`❌ Failed to log session event: ${error.message}`);
+    }
+  }
+
+  private endSession(): void {
+    if (!this.currentSessionId || !this.sessionStorePath) {
+      return;
+    }
+
+    const sessionEvent: SessionEvent = {
+      timestamp: new Date().toISOString(),
+      event_type: 'websocket_message_received',
+      direction: 'incoming',
+      message_data: { event: 'session_ended' }
+    };
+
+    this.logSessionEvent(sessionEvent);
+    console.log(`🔚 Ended session: ${this.currentSessionId}`);
+    this.currentSessionId = null;
+  }
+
+  private logIncomingMessage(message: WSMessage): void {
+    if (!this.currentSessionId) {
+      return;
+    }
+
+    const sessionEvent: SessionEvent = {
+      timestamp: new Date().toISOString(),
+      event_type: 'websocket_message_received',
+      direction: 'incoming',
+      message_data: message
+    };
+
+    this.logSessionEvent(sessionEvent);
+  }
+
+  private logOutgoingMessage(message: WSMessage): void {
+    if (!this.currentSessionId) {
+      return;
+    }
+
+    const sessionEvent: SessionEvent = {
+      timestamp: new Date().toISOString(),
+      event_type: 'websocket_message_sent',
+      direction: 'outgoing',
+      message_data: message
+    };
+
+    this.logSessionEvent(sessionEvent);
+  }
+
   private loadArtifactsIndex(): ArtifactsIndex | null {
     const artifactsIndexPath = process.env.ARTIFACTS_INDEX_PATH;
-    
+
     if (!artifactsIndexPath) {
       console.log('⚠️  ARTIFACTS_INDEX_PATH not configured, returning empty artifacts list');
       return null;
     }
-    
+
     if (!existsSync(artifactsIndexPath)) {
       console.error(`❌ Artifacts index file not found: ${artifactsIndexPath}`);
       return null;
     }
-    
+
     try {
       const fileContent = readFileSync(artifactsIndexPath, 'utf-8');
       const artifactsIndex: ArtifactsIndex = JSON.parse(fileContent);
-      
+
       // Validate the structure
       if (!artifactsIndex.artifacts_root_path || !Array.isArray(artifactsIndex.artifacts)) {
         console.error('❌ Invalid artifacts index structure');
         return null;
       }
-      
+
       console.log(`✅ Loaded ${artifactsIndex.artifacts.length} artifacts from ${artifactsIndexPath}`);
       return artifactsIndex;
-      
+
     } catch (error) {
       console.error(`❌ Error reading artifacts index file: ${error.message}`);
       return null;
@@ -386,12 +574,19 @@ class WebSocketAgentServer {
       console.log('Client connected - initializing new session');
       this.ws = ws;
 
+      // Start new session for logging
+      this.startNewSession();
+
       // Initialize AgentLoop when client connects
       this.initializeAgentLoop();
 
       ws.on('message', async (data) => {
         try {
           const message: WSMessage = JSON.parse(data.toString());
+
+          // Log incoming message
+          this.logIncomingMessage(message);
+
           await this.handleMessage(message);
         } catch (error) {
           console.error('Error handling message:', error);
@@ -401,11 +596,13 @@ class WebSocketAgentServer {
 
       ws.on('close', () => {
         console.log('Client disconnected');
+        this.endSession();
         this.cleanup();
       });
 
       ws.on('error', (error) => {
         console.error('WebSocket error:', error);
+        this.endSession();
         this.cleanup();
       });
     });
@@ -694,6 +891,9 @@ class WebSocketAgentServer {
 
   private sendMessage(message: WSMessage) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Log outgoing message before sending
+      this.logOutgoingMessage(message);
+
       this.ws.send(JSON.stringify(message));
     }
   }
@@ -813,6 +1013,11 @@ class WebSocketAgentServer {
   }
 
   private cleanup() {
+    // End session if still active
+    if (this.currentSessionId) {
+      this.endSession();
+    }
+
     if (this.agentLoop) {
       this.agentLoop.terminate();
       this.agentLoop = null;

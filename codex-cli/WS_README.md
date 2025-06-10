@@ -28,31 +28,31 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
    ```
 
 2. Configure environment variables:
-   
+
    **Option A: Using environment variables**
    ```bash
    # For OpenAI (default provider)
    export OPENAI_API_KEY="your-api-key-here"
-   
+
    # For Anthropic/Claude
    export ANTHROPIC_API_KEY="your-anthropic-key-here"
    export PROVIDER="anthropic"
    export MODEL="claude-3-5-sonnet-20241022"
-   
-   # For Google/Gemini  
+
+   # For Google/Gemini
    export GOOGLE_API_KEY="your-google-key-here"
    export PROVIDER="google"
    export MODEL="gemini-1.5-pro"
-   
+
    export WORKING_DIRECTORY="/path/to/your/project"  # Optional
    ```
-   
+
    **Option B: Using a .env file (recommended)**
    ```bash
    cp ws-server.env.example .env
    # Edit .env with your configuration
    ```
-   
+
    **Note**: The server will automatically:
    - Load variables from a `.env` file if present
    - Auto-detect the provider based on the model name, or use the `PROVIDER` environment variable
@@ -74,7 +74,7 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
    ```bash
    # Build the server
    node build-ws-server.mjs
-   
+
    # Start the server
    npm run start:ws
    ```
@@ -83,7 +83,7 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
    ```bash
    # Build the server
    node build-ws-server.mjs
-   
+
    # Start the server
    node dist/ws-server.js
    ```
@@ -124,7 +124,7 @@ interface WSMessage {
     "input": [
       {
         "type": "message",
-        "role": "user", 
+        "role": "user",
         "content": [{"type": "input_text", "text": "Your message here"}]
       }
     ],
@@ -286,34 +286,161 @@ The WebSocket server creates a fresh `AgentLoop` instance for each client connec
 - **Stateless Operation**: Uses `disableResponseStorage: true` to avoid server-side state issues
 - **Reliable Reconnection**: Clients can disconnect and reconnect without encountering stale function call errors
 
-## Security Considerations
+### Session Logging
 
-- The server runs with the same permissions as the user who starts it
-- File operations are constrained to the current working directory by default
-- Commands requiring approval will prompt the user before execution
-- Consider running in a sandboxed environment for production use
+When `SESSION_STORE_PATH` is configured, the server logs all WebSocket events to JSONL files for auditing and analysis:
 
-## Example Use Cases
+- **File Format**: Each session creates a file named `<session_id>.jsonl`
+- **Session IDs**: UUIDs with dashes removed (e.g., `a1b2c3d4e5f6789012345678901234567890abcd`)
+- **Event Logging**: All incoming and outgoing WebSocket messages are logged with timestamps
 
-1. **Web IDE Integration**: Embed the WebSocket client in a web-based IDE
-2. **Chat Interface**: Create a web chat interface for the AI agent
-3. **API Gateway**: Use as a bridge between web applications and the AgentLoop
-4. **Remote Development**: Access the agent from remote environments
+#### Session Event Structure
 
-## Troubleshooting
+Each line in a session JSONL file contains a JSON object with this structure:
 
-**Connection Issues**
-- Ensure the server is running on the correct port
-- Check that no firewall is blocking the connection
-- Verify WebSocket support in your client
+```typescript
+interface SessionEvent {
+  timestamp: string;           // ISO 8601 timestamp
+  event_type: string;         // Type of event (see below)
+  direction: 'incoming' | 'outgoing';  // Message direction
+  message_data: any;          // The actual WebSocket message content
+}
+```
 
-**Authentication Errors**
-- Verify your OpenAI API key is set correctly
-- Check API quota and billing status
+#### Event Types
 
-**Command Approval Issues**
-- Ensure proper approval response format
-- Check that the client handles approval requests correctly
+**Session Lifecycle Events**
+```json
+{
+  "timestamp": "2025-01-09T12:34:56.789Z",
+  "event_type": "websocket_message_received",
+  "direction": "incoming",
+  "message_data": {"event": "session_started"}
+}
+```
+
+```json
+{
+  "timestamp": "2025-01-09T12:45:30.123Z",
+  "event_type": "websocket_message_received",
+  "direction": "incoming",
+  "message_data": {"event": "session_ended"}
+}
+```
+
+**User Input Events**
+```json
+{
+  "timestamp": "2025-01-09T12:35:01.456Z",
+  "event_type": "websocket_message_received",
+  "direction": "incoming",
+  "message_data": {
+    "id": "msg-123",
+    "type": "user_input",
+    "payload": {
+      "input": [{"type": "input_text", "text": "Hello, can you help me?"}]
+    }
+  }
+}
+```
+
+**Agent Response Events**
+```json
+{
+  "timestamp": "2025-01-09T12:35:02.789Z",
+  "event_type": "websocket_message_sent",
+  "direction": "outgoing",
+  "message_data": {
+    "id": "resp-456",
+    "type": "response_item",
+    "payload": {
+      "type": "message",
+      "role": "assistant",
+      "content": [{"type": "input_text", "text": "Hello! I'd be happy to help you."}]
+    }
+  }
+}
+```
+
+**Approval Request Events**
+```json
+{
+  "timestamp": "2025-01-09T12:36:15.234Z",
+  "event_type": "websocket_message_sent",
+  "direction": "outgoing",
+  "message_data": {
+    "id": "approval-789",
+    "type": "approval_request",
+    "payload": {
+      "command": ["git", "status"],
+      "applyPatch": null
+    }
+  }
+}
+```
+
+**Approval Response Events**
+```json
+{
+  "timestamp": "2025-01-09T12:36:20.567Z",
+  "event_type": "websocket_message_received",
+  "direction": "incoming",
+  "message_data": {
+    "id": "approval-response-abc",
+    "type": "approval_response",
+    "payload": {"review": "YES"}
+  }
+}
+```
+
+**Loading State Events**
+```json
+{
+  "timestamp": "2025-01-09T12:35:05.890Z",
+  "event_type": "websocket_message_sent",
+  "direction": "outgoing",
+  "message_data": {
+    "id": "loading-def",
+    "type": "loading_state",
+    "payload": {"loading": true}
+  }
+}
+```
+
+**Error Events**
+```json
+{
+  "timestamp": "2025-01-09T12:37:00.123Z",
+  "event_type": "websocket_message_sent",
+  "direction": "outgoing",
+  "message_data": {
+    "id": "error-ghi",
+    "type": "error",
+    "payload": {
+      "message": "Command execution failed",
+      "details": {"exitCode": 1}
+    }
+  }
+}
+```
+
+### REST API for Session Management
+
+The server provides REST endpoints for accessing session data:
+
+**GET /sessions** - List all sessions
+```json
+{
+  "sessions": [
+    {
+      "session_id": "a1b2c3d4e5f6789012345678901234567890abcd",
+      "start_time": "2025-01-09T12:34:56.789Z",
+      "last_activity": "2025-01-09T12:45:30.123Z",
+      "event_count": 42
+    }
+  ]
+}
+```
 
 ## Development
 
