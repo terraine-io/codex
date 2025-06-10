@@ -166,9 +166,9 @@ interface SessionEvent {
 }
 
 interface SessionInfo {
-  session_id: string;
+  id: string;
   start_time: string;
-  last_activity: string;
+  last_update_time: string;
   event_count: number;
 }
 
@@ -375,9 +375,9 @@ class WebSocketAgentServer {
           const lastEvent: SessionEvent = JSON.parse(lines[lines.length - 1]);
 
           const sessionInfo: SessionInfo = {
-            session_id: sessionId,
+            id: sessionId,
             start_time: firstEvent.timestamp,
-            last_activity: lastEvent.timestamp,
+            last_update_time: lastEvent.timestamp,
             event_count: lines.length
           };
 
