@@ -187,6 +187,13 @@ class WebSocketAgentServer {
   private allowedOrigins: Set<string>;
   private currentSessionId: string | null = null;
   private sessionStorePath: string | null = null;
+  private messageFragments: Map<string, ResponseItem[]> = new Map();
+
+  // Fragment collection for turn-based message logging:
+  // Collects streaming message fragments during a conversation turn and combines
+  // them into complete messages for session logging while preserving real-time
+  // streaming to the client.
+  private currentTurnFragments: ResponseItem[] = [];
   // Note: lastResponseId is not needed when disableResponseStorage: true
 
   constructor(port: number = 8080) {
@@ -677,12 +684,19 @@ class WebSocketAgentServer {
 
       // Callback for streaming response items back to client
       onItem: (item: ResponseItem) => {
-        console.log(`📨 SERVER: Received response item type: ${item.type}${item.type === 'local_shell_call' ? ` (command: ${(item as any).action?.command?.join(' ')})` : ''}`);
+        // console.log(`📨 SERVER: Received response item type: ${item.type}, id: ${item.id}${item.type === 'local_shell_call' ? ` (command: ${(item as any).action?.command?.join(' ')})` : ''}`);
 
         // Add to context manager first for tracking
         this.contextManager?.addItem(item);
 
-        console.log(`📤 SERVER: Sending response item to client: ${item.type}`);
+        // STREAMING FRAGMENT COLLECTION:
+        // Collect message fragments for session logging while continuing to stream to client.
+        // This allows us to log complete messages instead of individual fragments.
+        if (item.type === 'message') {
+          this.currentTurnFragments.push(item);
+        }
+
+        // console.log(`📤 SERVER: Sending response item to client: ${item.type}`);
         // Then send to client
         this.sendMessage({
           id: randomUUID(),
@@ -693,6 +707,12 @@ class WebSocketAgentServer {
 
       // Callback for loading state changes
       onLoading: (loading: boolean) => {
+        // TURN START: Clear fragments when starting a new conversation turn
+        // This ensures we collect only fragments belonging to the current turn
+        if (loading) {
+          this.currentTurnFragments = [];
+        }
+
         this.sendMessage({
           id: randomUUID(),
           type: 'loading_state',
@@ -731,6 +751,11 @@ class WebSocketAgentServer {
 
       // Callback for tracking response IDs
       onLastResponseId: (responseId: string) => {
+        // TURN END: Log collected message fragments as a complete message
+        // This combines all streaming fragments from this turn into a single
+        // session log entry, avoiding multiple partial message entries
+        this.logCollectedTurnFragments(responseId);
+
         // Send context info with agent finished message
         const contextInfo = this.contextManager?.getContextInfo();
 
@@ -760,6 +785,83 @@ class WebSocketAgentServer {
         this.sendError('Failed to seed AgentLoop with compacted context', error);
       });
     }
+  }
+
+  /**
+   * Logs collected streaming fragments as a complete message for session storage.
+   *
+   * FRAGMENT COLLECTION WORKFLOW:
+   * 1. Turn Start: onLoading(true) → Clear currentTurnFragments
+   * 2. Streaming: onItem() called with message fragments → Add to currentTurnFragments
+   * 3. Turn End: onLastResponseId() → Combine fragments and log as complete message
+   * 4. Continue streaming to client: Individual fragments still sent to client in real-time
+   *
+   * This approach ensures session logs contain complete messages instead of multiple
+   * partial message events, while preserving the real-time streaming experience for clients.
+   */
+  private logCollectedTurnFragments(responseId: string): void {
+    if (this.currentTurnFragments.length === 0) {
+      return; // No fragments to log for this turn
+    }
+
+    // Combine all message fragments into a single complete message
+    const completeMessage = this.combineMessageFragments(this.currentTurnFragments);
+
+    if (completeMessage) {
+      // Log the complete message instead of individual fragments
+      const sessionEvent: SessionEvent = {
+        timestamp: new Date().toISOString(),
+        event_type: 'websocket_message_sent',
+        direction: 'outgoing',
+        message_data: {
+          id: randomUUID(),
+          type: 'response_item',
+          payload: completeMessage,
+        }
+      };
+
+      this.logSessionEvent(sessionEvent);
+    }
+
+    // Clear the fragments for the next turn
+    this.currentTurnFragments = [];
+  }
+
+  /**
+   * Combines streaming message fragments into a single complete message.
+   * Takes multiple message fragments with partial text content and merges
+   * them into one message with the full combined text.
+   */
+  private combineMessageFragments(fragments: ResponseItem[]): ResponseItem | null {
+    if (fragments.length === 0) {
+      return null;
+    }
+
+    // Use the first fragment as the base and combine content from all fragments
+    const baseMessage = { ...fragments[0] };
+
+    // Combine all text content from fragments
+    let combinedText = '';
+    for (const fragment of fragments) {
+      if (fragment.content && Array.isArray(fragment.content)) {
+        for (const contentItem of fragment.content) {
+          if (contentItem.type === 'output_text') {
+            combinedText += contentItem.text || '';
+          }
+        }
+      }
+    }
+
+    // Update the content with the combined text
+    if (baseMessage.content && Array.isArray(baseMessage.content)) {
+      baseMessage.content = [{
+        type: 'output_text',
+        text: combinedText,
+        annotations: []
+      }];
+    }
+
+    return baseMessage;
   }
 
   private async handleMessage(message: WSMessage) {
@@ -891,8 +993,17 @@ class WebSocketAgentServer {
 
   private sendMessage(message: WSMessage) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      // Log outgoing message before sending
-      this.logOutgoingMessage(message);
+      // FRAGMENT LOGGING FILTER:
+      // Skip logging individual message fragments to avoid duplicate entries.
+      // Message fragments are collected and logged as complete messages when
+      // the conversation turn ends (see logCollectedTurnFragments).
+      // Non-message items (function calls, loading states, etc.) are logged immediately.
+      const shouldLogFragment = message.type === 'response_item' &&
+                                 message.payload?.type === 'message';
+
+      if (!shouldLogFragment) {
+        this.logOutgoingMessage(message);
+      }
 
       this.ws.send(JSON.stringify(message));
     }
@@ -1032,6 +1143,10 @@ class WebSocketAgentServer {
       this.pendingApprovalRequest.reject(new Error('Connection closed'));
       this.pendingApprovalRequest = null;
     }
+
+    // Clear any remaining message fragments
+    this.messageFragments.clear();
+    this.currentTurnFragments = [];
 
     this.ws = null;
   }
