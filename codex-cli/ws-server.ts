@@ -3,6 +3,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
+import { readFileSync, existsSync } from 'fs';
+import { basename } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
@@ -142,6 +144,17 @@ interface ContextCompactedMessage extends WSMessage {
     reductionPercent: number;
     strategy: string;
   };
+}
+
+// Types for artifacts
+interface ArtifactItem {
+  file_path: string;
+  overview: string;
+}
+
+interface ArtifactsIndex {
+  artifacts_root_path: string;
+  artifacts: ArtifactItem[];
 }
 
 class WebSocketAgentServer {
@@ -298,8 +311,32 @@ class WebSocketAgentServer {
   }
 
   private handleGetArtifacts(req: IncomingMessage, res: ServerResponse): void {
-    const artifacts: any[] = []; // Empty list for now
-    this.sendJsonResponse(res, 200, { artifacts });
+    try {
+      const artifactsIndex = this.loadArtifactsIndex();
+      
+      if (!artifactsIndex) {
+        // Return empty list if no index file is configured or available
+        this.sendJsonResponse(res, 200, { artifacts: [] });
+        return;
+      }
+      
+      // Add relative_file_path to each artifact and rename overview to overview_md
+      const enrichedArtifacts = artifactsIndex.artifacts.map(artifact => ({
+        file_path: artifact.file_path,
+        overview_md: artifact.overview,
+        relative_file_path: basename(artifact.file_path)
+      }));
+      
+      // Return the artifacts from the index file
+      this.sendJsonResponse(res, 200, { 
+        artifacts: enrichedArtifacts,
+        artifacts_root_path: artifactsIndex.artifacts_root_path
+      });
+      
+    } catch (error) {
+      console.error('Error handling /artifacts request:', error);
+      this.sendHttpError(res, 500, 'Internal server error while loading artifacts');
+    }
   }
 
   private sendJsonResponse(res: ServerResponse, statusCode: number, data: any): void {
@@ -310,6 +347,38 @@ class WebSocketAgentServer {
 
   private sendHttpError(res: ServerResponse, statusCode: number, message: string): void {
     this.sendJsonResponse(res, statusCode, { error: message });
+  }
+
+  private loadArtifactsIndex(): ArtifactsIndex | null {
+    const artifactsIndexPath = process.env.ARTIFACTS_INDEX_PATH;
+    
+    if (!artifactsIndexPath) {
+      console.log('⚠️  ARTIFACTS_INDEX_PATH not configured, returning empty artifacts list');
+      return null;
+    }
+    
+    if (!existsSync(artifactsIndexPath)) {
+      console.error(`❌ Artifacts index file not found: ${artifactsIndexPath}`);
+      return null;
+    }
+    
+    try {
+      const fileContent = readFileSync(artifactsIndexPath, 'utf-8');
+      const artifactsIndex: ArtifactsIndex = JSON.parse(fileContent);
+      
+      // Validate the structure
+      if (!artifactsIndex.artifacts_root_path || !Array.isArray(artifactsIndex.artifacts)) {
+        console.error('❌ Invalid artifacts index structure');
+        return null;
+      }
+      
+      console.log(`✅ Loaded ${artifactsIndex.artifacts.length} artifacts from ${artifactsIndexPath}`);
+      return artifactsIndex;
+      
+    } catch (error) {
+      console.error(`❌ Error reading artifacts index file: ${error.message}`);
+      return null;
+    }
   }
 
   private setupWebSocketServer() {
