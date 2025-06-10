@@ -13,7 +13,6 @@ import { ReviewDecision } from './src/utils/agent/review.js';
 import { ContextManager, createContextManager, type ContextInfo } from './context-managers.js';
 import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
-import { existsSync } from 'fs';
 import { resolve } from 'path';
 import { initLogger, debug } from './src/utils/logger/log.js';
 
@@ -587,6 +586,98 @@ class WebSocketAgentServer {
     console.log(`🆔 Connected to session: ${this.currentSessionId}`);
   }
 
+  private loadSessionEvents(sessionId: string): SessionEvent[] {
+    if (!this.sessionStorePath) {
+      console.log('⚠️  Session storage not configured, starting fresh session');
+      return [];
+    }
+
+    try {
+      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
+      
+      if (!existsSync(sessionFile)) {
+        console.log(`📝 No existing session file found for ${sessionId}, starting fresh`);
+        return [];
+      }
+
+      // Read the entire session file
+      const content = readFileSync(sessionFile, 'utf-8');
+      const lines = content.trim().split('\n').filter(line => line.length > 0);
+
+      if (lines.length === 0) {
+        console.log(`📝 Empty session file for ${sessionId}, starting fresh`);
+        return [];
+      }
+
+      // Parse all events
+      const events: SessionEvent[] = [];
+      for (const line of lines) {
+        try {
+          const event: SessionEvent = JSON.parse(line);
+          events.push(event);
+        } catch (parseError) {
+          console.error(`❌ Error parsing event in session ${sessionId}:`, parseError);
+          // Continue with other events instead of failing completely
+        }
+      }
+
+      console.log(`📚 Loaded ${events.length} events from session ${sessionId}`);
+      return events;
+
+    } catch (error) {
+      console.error(`❌ Error loading session events for ${sessionId}:`, error);
+      return [];
+    }
+  }
+
+  private reconstructTranscriptFromEvents(events: SessionEvent[]): Array<ResponseInputItem> {
+    const transcript: Array<ResponseInputItem> = [];
+
+    for (const event of events) {
+      // Skip non-message events
+      if (event.event_type !== 'websocket_message_received' && 
+          event.event_type !== 'websocket_message_sent') {
+        continue;
+      }
+
+      // Skip system events like session_started, session_connected, etc.
+      if (event.message_data?.event) {
+        continue;
+      }
+
+      // Process user input messages
+      if (event.event_type === 'websocket_message_received' && 
+          event.message_data?.type === 'user_input') {
+        const userInput = event.message_data.payload?.input;
+        if (userInput && Array.isArray(userInput)) {
+          transcript.push(...userInput);
+        }
+      }
+
+      // Process response items (assistant messages, tool calls, etc.)
+      if (event.event_type === 'websocket_message_sent' && 
+          event.message_data?.type === 'response_item') {
+        const responseItem = event.message_data.payload;
+        if (responseItem) {
+          // Convert response item to input item format for transcript
+          const inputItem: ResponseInputItem = {
+            id: responseItem.id,
+            type: responseItem.type,
+            role: responseItem.role,
+            status: responseItem.status,
+            content: responseItem.content,
+            ...(responseItem.action && { action: responseItem.action }),
+            ...(responseItem.result && { result: responseItem.result })
+          };
+          transcript.push(inputItem);
+        }
+      }
+    }
+
+    console.log(`🔄 Reconstructed transcript with ${transcript.length} items`);
+    return transcript;
+  }
+
   private logSessionEvent(event: SessionEvent): void {
     if (!this.sessionStorePath || !this.currentSessionId) {
       return;
@@ -696,8 +787,12 @@ class WebSocketAgentServer {
       // Use the session ID from the URL path
       this.startSessionWithId(sessionId);
 
-      // Initialize AgentLoop when client connects
-      this.initializeAgentLoop();
+      // Load existing session events and reconstruct transcript for resumption
+      const sessionEvents = this.loadSessionEvents(sessionId);
+      const resumeTranscript = this.reconstructTranscriptFromEvents(sessionEvents);
+
+      // Initialize AgentLoop when client connects, with session resumption if available
+      this.initializeAgentLoop(undefined, resumeTranscript.length > 0 ? resumeTranscript : undefined);
 
       ws.on('message', async (data) => {
         try {
@@ -727,7 +822,7 @@ class WebSocketAgentServer {
     });
   }
 
-  private initializeAgentLoop(seedInput?: Array<ResponseInputItem>) {
+  private initializeAgentLoop(seedInput?: Array<ResponseInputItem>, resumeTranscript?: Array<ResponseInputItem>) {
     // Clean up any existing agent loop and reset state
     if (this.agentLoop) {
       console.log('Terminating existing AgentLoop');
@@ -896,6 +991,17 @@ class WebSocketAgentServer {
         console.error('Error seeding AgentLoop:', error);
         this.sendError('Failed to seed AgentLoop with compacted context', error);
       });
+    }
+    
+    // If we have a resume transcript (from session resumption), initialize the transcript
+    if (resumeTranscript && resumeTranscript.length > 0) {
+      console.log(`🔄 Resuming session with ${resumeTranscript.length} items from previous conversation...`);
+      // Initialize the transcript without making API calls
+      if (this.agentLoop.initializeTranscript) {
+        this.agentLoop.initializeTranscript(resumeTranscript);
+      } else {
+        console.warn('⚠️  AgentLoop implementation does not support initializeTranscript - session resumption unavailable');
+      }
     }
   }
 

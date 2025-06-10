@@ -133,6 +133,72 @@ export class ClaudeAgentLoop implements IAgentLoop {
   }
 
   /**
+   * Initialize agent with historical transcript (for session resumption)
+   * This populates the internal conversation state without making API calls
+   */
+  public initializeTranscript(transcript: Array<ResponseInputItem>): void {
+    if (this.terminated) {
+      throw new Error("ClaudeAgentLoop has been terminated");
+    }
+
+    console.log(`🔄 Initializing ClaudeAgentLoop with ${transcript.length} historical items`);
+
+    // Clear existing state
+    this.transcript = [];
+    this.claudeMessages = [];
+
+    // Populate transcript for compatibility
+    this.transcript.push(...transcript);
+
+    // Convert transcript to Claude messages format
+    for (const item of transcript) {
+      if (item.type === 'message') {
+        if (item.role === 'user') {
+          // Handle user messages
+          let contentItems: any[] = [];
+          if (typeof item.content === 'string') {
+            contentItems = [{ type: 'input_text', text: item.content }];
+          } else if (Array.isArray(item.content)) {
+            contentItems = item.content;
+          }
+
+          const content = contentItems.map(c => ({
+            type: 'text' as const,
+            text: c.type === 'input_text' ? c.text : `[${c.type}]`
+          }));
+
+          this.claudeMessages.push({
+            role: 'user',
+            content
+          });
+
+        } else if (item.role === 'assistant') {
+          // Handle assistant messages
+          let content: any[] = [];
+          if (typeof item.content === 'string') {
+            content = [{ type: 'text', text: item.content }];
+          } else if (Array.isArray(item.content)) {
+            content = item.content.map(c => {
+              if (c.type === 'output_text') {
+                return { type: 'text', text: c.text || '' };
+              }
+              return c; // Tool use content should already be in correct format
+            });
+          }
+
+          this.claudeMessages.push({
+            role: 'assistant',
+            content
+          });
+        }
+      }
+      // Handle tool calls and other types if needed in the future
+    }
+
+    console.log(`✅ Initialized ClaudeAgentLoop with ${this.claudeMessages.length} Claude messages`);
+  }
+
+  /**
    * Execute agent conversation turn with multi-turn loop
    */
   public async run(

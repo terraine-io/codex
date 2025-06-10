@@ -534,6 +534,27 @@ export class AgentLoop implements IAgentLoop {
     return [outputItem, ...additionalItems];
   }
 
+  /**
+   * Initialize agent with historical transcript (for session resumption)
+   * This populates the internal conversation state without making API calls
+   */
+  public initializeTranscript(transcript: Array<ResponseInputItem>): void {
+    if (this.terminated) {
+      throw new Error("AgentLoop has been terminated");
+    }
+
+    console.log(`🔄 Initializing AgentLoop with ${transcript.length} historical items`);
+
+    // Clear existing state
+    this.transcript = [];
+    this.pendingAborts.clear();
+
+    // Populate transcript
+    this.transcript.push(...transcript);
+
+    console.log(`✅ Initialized AgentLoop with ${transcript.length} transcript items`);
+  }
+
   public async run(
     input: Array<ResponseInputItem>,
     previousResponseId: string = "",

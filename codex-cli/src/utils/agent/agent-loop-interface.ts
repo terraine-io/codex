@@ -72,6 +72,12 @@ export interface IAgentLoop {
    * Terminate agent (makes instance unusable)
    */
   terminate(): void;
+
+  /**
+   * Initialize agent with historical transcript (for session resumption)
+   * This populates the internal conversation state without making API calls
+   */
+  initializeTranscript?(transcript: Array<ResponseInputItem>): void;
 }
 
 /**
