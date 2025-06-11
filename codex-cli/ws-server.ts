@@ -935,10 +935,28 @@ class WebSocketAgentServer {
       apiKey = process.env.OPENAI_API_KEY || '';
     }
 
+    // Load instructions from file if specified
+    let instructions = '';
+    const instructionsFilePath = process.env.INSTRUCTIONS_FILE_PATH;
+    if (instructionsFilePath) {
+      try {
+        if (existsSync(instructionsFilePath)) {
+          instructions = readFileSync(instructionsFilePath, 'utf-8');
+          console.log(`✅ Loaded instructions from file: ${instructionsFilePath}`);
+        } else {
+          console.error(`❌ Instructions file not found: ${instructionsFilePath}`);
+          console.error('Please create the file or update INSTRUCTIONS_FILE_PATH in your .env file');
+        }
+      } catch (error) {
+        console.error(`❌ Error reading instructions file: ${error.message}`);
+        console.error('Using empty instructions');
+      }
+    }
+
     // Default configuration - you can modify this based on your needs
     const config: AppConfig = {
       model, // Use same default as TUI for better tool behavior
-      instructions: process.env.INSTRUCTIONS || '', // Allow instructions override via env
+      instructions,
       apiKey,
     };
 

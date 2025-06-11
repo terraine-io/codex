@@ -243,7 +243,7 @@ The server supports the following environment variables (can be set via `.env` f
 | `GOOGLE_APPLICATION_CREDENTIALS` | Conditional | Path to Google service account JSON (alternative to API key) | `/path/to/service-account.json` |
 | `PROVIDER` | No | AI provider to use | `openai`, `anthropic`, `google` |
 | `MODEL` | No | Model to use | `gpt-4`, `claude-3-5-sonnet-20241022`, `gemini-1.5-pro` |
-| `INSTRUCTIONS` | No | Custom system instructions for the AI | `You are a helpful coding assistant.` |
+| `INSTRUCTIONS_FILE_PATH` | No | Path to file containing custom system instructions for the AI | `./system-prompt.txt` |
 | `WORKING_DIRECTORY` | No | Working directory for the server | `/path/to/project` |
 | `CONTEXT_STRATEGY` | No | Context management strategy | `threshold`, `dummy` |
 | `CONTEXT_COMPACTION_THRESHOLD` | No | Auto-compaction threshold (0.0-1.0) | `0.8` |
@@ -268,9 +268,25 @@ if (provider === 'anthropic') {
   apiKey = process.env.OPENAI_API_KEY || '';
 }
 
+// Load instructions from file if specified
+let instructions = '';
+const instructionsFilePath = process.env.INSTRUCTIONS_FILE_PATH;
+if (instructionsFilePath) {
+  try {
+    if (existsSync(instructionsFilePath)) {
+      instructions = readFileSync(instructionsFilePath, 'utf-8');
+      console.log(`✅ Loaded instructions from file: ${instructionsFilePath}`);
+    } else {
+      console.error(`❌ Instructions file not found: ${instructionsFilePath}`);
+    }
+  } catch (error) {
+    console.error(`❌ Error reading instructions file: ${error.message}`);
+  }
+}
+
 const config: AppConfig = {
   model,
-  instructions: process.env.INSTRUCTIONS || '',
+  instructions,
   apiKey,
 };
 
