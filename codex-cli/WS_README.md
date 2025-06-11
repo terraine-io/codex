@@ -244,7 +244,10 @@ The server supports the following environment variables (can be set via `.env` f
 | `PROVIDER` | No | AI provider to use | `openai`, `anthropic`, `google` |
 | `MODEL` | No | Model to use | `gpt-4`, `claude-3-5-sonnet-20241022`, `gemini-1.5-pro` |
 | `INSTRUCTIONS_FILE_PATH` | No | Path to file containing custom system instructions for the AI | `./system-prompt.txt` |
+| `TOOL_USE_APPROVAL_MODE` | No | Tool usage approval policy | `suggest`, `auto-edit`, `full-auto` |
 | `WORKING_DIRECTORY` | No | Working directory for the server | `/path/to/project` |
+| `SESSION_STORE_PATH` | No | Directory for storing session logs | `./sessions` |
+| `TODOS_STORE_PATH` | No | Directory for storing session todos files | `./todos` |
 | `CONTEXT_STRATEGY` | No | Context management strategy | `threshold`, `dummy` |
 | `CONTEXT_COMPACTION_THRESHOLD` | No | Auto-compaction threshold (0.0-1.0) | `0.8` |
 | `LOG_LEVEL` | No | Logging level | `trace`, `debug`, `info`, `warn`, `error` |
@@ -290,8 +293,104 @@ const config: AppConfig = {
   apiKey,
 };
 
-const approvalPolicy: ApprovalPolicy = 'suggest'; // 'suggest', 'auto-edit', 'full-auto'
+// Configure approval policy from environment variable
+const approvalModeEnv = process.env.TOOL_USE_APPROVAL_MODE;
+let approvalPolicy: ApprovalPolicy = 'suggest'; // Conservative by default
+
+if (approvalModeEnv) {
+  if (approvalModeEnv === 'suggest' || approvalModeEnv === 'auto-edit' || approvalModeEnv === 'full-auto') {
+    approvalPolicy = approvalModeEnv;
+    console.log(`✅ Using tool approval mode: ${approvalPolicy}`);
+  } else {
+    console.error(`❌ Invalid TOOL_USE_APPROVAL_MODE: ${approvalModeEnv}`);
+    console.error('Valid values are: suggest, auto-edit, full-auto');
+    console.error('Using default: suggest');
+  }
+} else {
+  console.log(`ℹ️  Using default tool approval mode: ${approvalPolicy}`);
+}
 ```
+
+### Tool Approval Modes
+
+The `TOOL_USE_APPROVAL_MODE` environment variable controls how permissive the agent is when executing commands and making file changes. This significantly affects the user experience by reducing the number of approval prompts:
+
+#### `suggest` (Default - Most Secure)
+```bash
+export TOOL_USE_APPROVAL_MODE="suggest"
+```
+- **Behavior**: Only "known safe" read-only commands are auto-approved
+- **User Experience**: Requires approval for most file modifications and system commands
+- **Use Case**: Maximum security, ideal for sensitive environments or when you want full control
+- **Auto-approved commands**: `ls`, `cat`, `pwd`, `git status`, `grep`, `find` (without exec), etc.
+
+#### `auto-edit` (Balanced)
+```bash
+export TOOL_USE_APPROVAL_MODE="auto-edit"
+```
+- **Behavior**: Safe commands + file edits within approved writable paths are auto-approved
+- **User Experience**: Reduces approval prompts for file edits in your project directory
+- **Use Case**: Good balance of productivity and safety for trusted projects
+- **Auto-approved**: All `suggest` commands + `apply_patch` commands that only modify files within writable roots
+
+#### `full-auto` (Most Permissive)
+```bash
+export TOOL_USE_APPROVAL_MODE="full-auto"
+```
+- **Behavior**: All commands are auto-approved but run in a security sandbox
+- **User Experience**: Minimal approval prompts, maximum productivity
+- **Use Case**: Trusted environments, rapid prototyping, or when using additional container security
+- **Security**: Commands run with restricted network access and limited write permissions
+
+**Important**: When using `full-auto` mode, ensure your environment has appropriate security measures in place, as the agent will execute commands without asking for permission.
+
+### Session Task Planning
+
+When a new session is created (i.e., when connecting to a session ID that doesn't have existing events), the server automatically creates a `<session_id>.md` file in the todos store directory (configured via `TODOS_STORE_PATH`). This file serves as a persistent task planning and tracking document for that specific session.
+
+#### Todos File Features
+
+- **Automatic Creation**: Created only for genuinely new sessions (not when resuming existing sessions)
+- **Session-Specific**: Each session gets its own todos file named `<session_id>.md`
+- **Separate Storage**: Stored in `TODOS_STORE_PATH` directory, separate from session logs
+- **Persistent Tracking**: Todos persist independently of session logs and can be managed separately
+- **Markdown Format**: Easy to read and edit both manually and programmatically
+- **Task Tracking**: Provides structure for current and completed tasks
+- **Agent Integration**: The agent can read and update this file to plan and track progress
+
+**Note**: The todos file will only be created if `TODOS_STORE_PATH` is configured. If todos storage is disabled, no todos file will be created.
+
+#### Example Session Todos File Structure
+
+For session ID `a1b2c3d4e5f6789012345678901234567890abcd`, the file `a1b2c3d4e5f6789012345678901234567890abcd.md` would contain:
+
+```markdown
+# Terraine Session Todos
+
+Session ID: `a1b2c3d4e5f6789012345678901234567890abcd`
+Created: 2025-01-09T12:34:56.789Z
+
+This file helps the agent plan and track tasks for the current session.
+
+## Current Tasks
+
+- [ ] No tasks yet - add your goals here
+
+## Completed Tasks
+
+(Tasks will be moved here when completed)
+
+---
+
+*This file was auto-created for session tracking. You can edit it manually or let the agent update it.*
+```
+
+#### Usage Tips
+
+1. **Pre-populate**: Edit the file before starting your conversation to give the agent clear objectives
+2. **Collaboration**: The agent can read your manual edits and update the file as work progresses
+3. **Progress Tracking**: Use it to track what's been accomplished across multiple conversation turns
+4. **Planning**: Help the agent break down complex tasks into manageable steps
 
 ## Session Management
 
@@ -548,6 +647,16 @@ The server provides REST endpoints for accessing session data:
 - Returns `404 Not Found` if session doesn't exist
 - Returns `409 Conflict` if trying to delete an active session
 
+**POST /sessions/{sessionId}:switch** - Switch to a session context
+- Switches the agent's context to the specified session
+- Creates a symbolic link `.terraine-todos.md` in the working directory pointing to the session's todos file
+- Creates the session's todos file if it doesn't exist
+- Overwrites any existing symbolic link (but protects regular files)
+- Returns `200 OK` with session switch details on success
+- Returns `404 Not Found` if session doesn't exist
+- Returns `409 Conflict` if `.terraine-todos.md` exists as a regular file
+- Returns `503 Service Unavailable` if todos storage is not configured
+
 #### REST API Usage Examples
 
 ```bash
@@ -562,6 +671,33 @@ curl http://localhost:8080/sessions/a1b2c3d4e5f6789012345678901234567890abcd
 
 # Delete a session
 curl -X DELETE http://localhost:8080/sessions/a1b2c3d4e5f6789012345678901234567890abcd
+
+# Switch to a session context
+curl -X POST http://localhost:8080/sessions/a1b2c3d4e5f6789012345678901234567890abcd:switch
+```
+
+#### Session Context Switching
+
+The session switching feature allows you to work with one session at a time while easily switching between different sessions. When you switch to a session:
+
+1. **Symbolic Link Creation**: A `.terraine-todos.md` symlink is created in your working directory
+2. **Points to Session Todos**: The symlink points to the specific session's todos file in `TODOS_STORE_PATH`
+3. **Agent Access**: The agent can easily access the current session's todos via the well-known filename
+4. **Context Isolation**: Only one session's todos are "active" at a time
+
+**Example workflow:**
+```bash
+# Switch to session abc123
+curl -X POST http://localhost:8080/sessions/abc123:switch
+
+# Now .terraine-todos.md -> todos/abc123.md
+# Agent can read/write .terraine-todos.md to work with this session's tasks
+
+# Switch to a different session
+curl -X POST http://localhost:8080/sessions/def456:switch
+
+# Now .terraine-todos.md -> todos/def456.md  
+# Agent context has switched to the new session
 ```
 
 ## Development

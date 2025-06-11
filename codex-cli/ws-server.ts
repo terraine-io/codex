@@ -3,7 +3,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
-import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync } from 'fs';
 import { basename, join } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
@@ -186,6 +186,7 @@ class WebSocketAgentServer {
   private allowedOrigins: Set<string>;
   private currentSessionId: string | null = null;
   private sessionStorePath: string | null = null;
+  private todosStorePath: string | null = null;
   private messageFragments: Map<string, ResponseItem[]> = new Map();
 
   // Fragment collection for turn-based message logging:
@@ -201,6 +202,9 @@ class WebSocketAgentServer {
 
     // Initialize session storage
     this.initializeSessionStorage();
+    
+    // Initialize todos storage
+    this.initializeTodosStorage();
 
     // Create HTTP server first
     this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
@@ -351,6 +355,15 @@ class WebSocketAgentServer {
     } else if (method === 'DELETE' && pathname.startsWith('/sessions/')) {
       const sessionId = pathname.substring('/sessions/'.length);
       this.handleDeleteSession(sessionId, req, res);
+    } else if (method === 'POST' && pathname.includes(':switch')) {
+      // Handle POST /sessions/{session_id}:switch
+      const match = pathname.match(/^\/sessions\/([^:]+):switch$/);
+      if (match) {
+        const sessionId = match[1];
+        this.handleSwitchSession(sessionId, req, res);
+      } else {
+        this.sendHttpError(res, 400, 'Invalid switch session path format');
+      }
     } else if (method === 'GET' && pathname === '/artifacts') {
       this.handleGetArtifacts(req, res);
     } else {
@@ -572,6 +585,134 @@ class WebSocketAgentServer {
     }
   }
 
+  private handleSwitchSession(sessionId: string, req: IncomingMessage, res: ServerResponse): void {
+    try {
+      // Validate session ID format
+      if (!/^[a-zA-Z0-9]+$/.test(sessionId)) {
+        this.sendHttpError(res, 400, 'Invalid session ID format');
+        return;
+      }
+
+      // Check if todos storage is configured
+      if (!this.todosStorePath) {
+        this.sendHttpError(res, 503, 'Todos storage not configured');
+        return;
+      }
+
+      // Check if session exists (either in session storage or has a todos file)
+      const sessionExists = this.sessionExists(sessionId);
+      if (!sessionExists) {
+        this.sendHttpError(res, 404, 'Session not found');
+        return;
+      }
+
+      // Get working directory
+      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
+      const linkPath = join(workingDir, '.terraine-todos.md');
+      const targetPath = join(this.todosStorePath, `${sessionId}.md`);
+
+      // Remove existing link if it exists
+      if (existsSync(linkPath)) {
+        try {
+          const stats = lstatSync(linkPath);
+          if (stats.isSymbolicLink()) {
+            rmSync(linkPath);
+            console.log(`🔗 Removed existing todos link: ${linkPath}`);
+          } else {
+            // If it's a regular file, don't remove it - that would be destructive
+            this.sendHttpError(res, 409, 'Cannot switch session: .terraine-todos.md exists as a regular file');
+            return;
+          }
+        } catch (linkError) {
+          console.error(`Warning: Error checking/removing existing link: ${linkError.message}`);
+        }
+      }
+
+      // Create todos file if it doesn't exist
+      if (!existsSync(targetPath)) {
+        this.createTodosFileForSession(sessionId);
+      }
+
+      // Create symbolic link
+      try {
+        symlinkSync(targetPath, linkPath);
+        console.log(`🔗 Created todos link: ${linkPath} -> ${targetPath}`);
+      } catch (symlinkError) {
+        console.error(`Error creating symbolic link: ${symlinkError.message}`);
+        this.sendHttpError(res, 500, 'Failed to create todos symbolic link');
+        return;
+      }
+
+      // Return success response
+      this.sendJsonResponse(res, 200, {
+        message: 'Session switched successfully',
+        sessionId,
+        todosFile: targetPath,
+        linkPath
+      });
+
+      console.log(`🔄 Switched to session: ${sessionId}`);
+
+    } catch (error) {
+      console.error(`Error switching to session ${sessionId}:`, error);
+      this.sendHttpError(res, 500, 'Internal server error while switching session');
+    }
+  }
+
+  private sessionExists(sessionId: string): boolean {
+    // Check if session has a log file (if session storage is configured)
+    if (this.sessionStorePath) {
+      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
+      if (existsSync(sessionFile)) {
+        return true;
+      }
+    }
+
+    // Check if session has a todos file (if todos storage is configured)
+    if (this.todosStorePath) {
+      const todosFile = join(this.todosStorePath, `${sessionId}.md`);
+      if (existsSync(todosFile)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private createTodosFileForSession(sessionId: string): void {
+    if (!this.todosStorePath) {
+      return;
+    }
+
+    try {
+      const todosFilePath = join(this.todosStorePath, `${sessionId}.md`);
+      const todosTemplate = `# Terraine Session Todos
+
+Session ID: \`${sessionId}\`
+Created: ${new Date().toISOString()}
+
+This file helps the agent plan and track tasks for the current session.
+
+## Current Tasks
+
+- [ ] No tasks yet - add your goals here
+
+## Completed Tasks
+
+(Tasks will be moved here when completed)
+
+---
+
+*This file was auto-created for session tracking. You can edit it manually or let the agent update it.*
+`;
+
+      writeFileSync(todosFilePath, todosTemplate, 'utf-8');
+      console.log(`📝 Created todos file for session: ${todosFilePath}`);
+    } catch (error) {
+      console.error(`❌ Failed to create todos file for session ${sessionId}: ${error.message}`);
+    }
+  }
+
   private handleGetArtifacts(req: IncomingMessage, res: ServerResponse): void {
     try {
       const artifactsIndex = this.loadArtifactsIndex();
@@ -632,6 +773,30 @@ class WebSocketAgentServer {
     } catch (error) {
       console.error(`❌ Failed to initialize session storage: ${error.message}`);
       this.sessionStorePath = null;
+    }
+  }
+
+  private initializeTodosStorage(): void {
+    const todosStorePath = process.env.TODOS_STORE_PATH;
+
+    if (!todosStorePath) {
+      console.log('⚠️  TODOS_STORE_PATH not configured, todos creation disabled');
+      return;
+    }
+
+    try {
+      // Create directory if it doesn't exist
+      if (!existsSync(todosStorePath)) {
+        mkdirSync(todosStorePath, { recursive: true });
+        console.log(`📁 Created todos store directory: ${todosStorePath}`);
+      }
+
+      this.todosStorePath = todosStorePath;
+      console.log(`✅ Todos creation enabled, storing in: ${todosStorePath}`);
+
+    } catch (error) {
+      console.error(`❌ Failed to initialize todos storage: ${error.message}`);
+      this.todosStorePath = null;
     }
   }
 
@@ -779,6 +944,51 @@ class WebSocketAgentServer {
     }
   }
 
+  private createTodosFile(): void {
+    if (!this.todosStorePath) {
+      console.log('⚠️  Cannot create todos file: TODOS_STORE_PATH not configured');
+      return;
+    }
+
+    if (!this.currentSessionId) {
+      console.log('⚠️  Cannot create todos file: no current session ID');
+      return;
+    }
+
+    try {
+      const todosFilePath = join(this.todosStorePath, `${this.currentSessionId}.md`);
+      
+      // Only create if it doesn't already exist
+      if (!existsSync(todosFilePath)) {
+        const todosTemplate = `# Terraine Session Todos
+
+Created: ${new Date().toISOString()}
+
+This file helps the agent plan and track tasks for the current session.
+
+## Current Tasks
+
+- [ ] No tasks yet - add your goals here
+
+## Completed Tasks
+
+(Tasks will be moved here when completed)
+
+---
+
+`;
+
+        writeFileSync(todosFilePath, todosTemplate, 'utf-8');
+        console.log(`📝 Created todos file: ${todosFilePath}`);
+      } else {
+        console.log(`📝 Todos file already exists: ${todosFilePath}`);
+      }
+    } catch (error) {
+      console.error(`❌ Failed to create todos file: ${error.message}`);
+      // Don't fail the session if todos file creation fails
+    }
+  }
+
   private endSession(): void {
     if (!this.currentSessionId || !this.sessionStorePath) {
       return;
@@ -878,6 +1088,11 @@ class WebSocketAgentServer {
       const sessionEvents = this.loadSessionEvents(sessionId);
       const resumeTranscript = this.reconstructTranscriptFromEvents(sessionEvents);
 
+      // Create todos file for new sessions (when no events exist)
+      if (sessionEvents.length === 0) {
+        this.createTodosFile();
+      }
+
       // Initialize AgentLoop when client connects, with session resumption if available
       this.initializeAgentLoop(undefined, resumeTranscript.length > 0 ? resumeTranscript : undefined);
 
@@ -960,7 +1175,22 @@ class WebSocketAgentServer {
       apiKey,
     };
 
-    const approvalPolicy: ApprovalPolicy = 'suggest'; // Conservative by default
+    // Configure approval policy from environment variable
+    const approvalModeEnv = process.env.TOOL_USE_APPROVAL_MODE;
+    let approvalPolicy: ApprovalPolicy = 'suggest'; // Conservative by default
+    
+    if (approvalModeEnv) {
+      if (approvalModeEnv === 'suggest' || approvalModeEnv === 'auto-edit' || approvalModeEnv === 'full-auto') {
+        approvalPolicy = approvalModeEnv;
+        console.log(`✅ Using tool approval mode: ${approvalPolicy}`);
+      } else {
+        console.error(`❌ Invalid TOOL_USE_APPROVAL_MODE: ${approvalModeEnv}`);
+        console.error('Valid values are: suggest, auto-edit, full-auto');
+        console.error('Using default: suggest');
+      }
+    } else {
+      console.log(`ℹ️  Using default tool approval mode: ${approvalPolicy}`);
+    }
 
     // Initialize context manager if not exists or reset if recreating
     if (!this.contextManager) {
