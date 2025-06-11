@@ -645,6 +645,7 @@ The server provides REST endpoints for accessing session data:
 - Archives the session file and associated todos file by moving them to hidden files with ISO timestamps
 - Session file: `{sessionId}.jsonl` → `.{sessionId}-{timestamp}.jsonl`
 - Todos file: `{sessionId}.md` → `.{sessionId}-{timestamp}.md` (if exists)
+- Cleans up `.terraine-todos.md` symlink if it points to the archived session
 - Returns `204 No Content` on success
 - Returns `404 Not Found` if session doesn't exist
 - Returns `409 Conflict` if trying to delete an active session

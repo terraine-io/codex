@@ -3,8 +3,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
-import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync, renameSync } from 'fs';
-import { basename, join } from 'path';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync, renameSync, readlinkSync } from 'fs';
+import { basename, join, resolve } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
@@ -586,6 +586,9 @@ class WebSocketAgentServer {
           renameSync(todosFile, archivedTodosFile);
           console.log(`📦 Archived todos file: ${todosFile} -> ${archivedTodosFile}`);
         }
+
+        // Clean up symlink if it points to this session's todos file
+        this.cleanupSymlinkIfPointsToSession(sessionId);
       }
 
       console.log(`🗂️  Archived session via API: ${sessionId}`);
@@ -621,41 +624,29 @@ class WebSocketAgentServer {
         return;
       }
 
-      // Get working directory
-      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
-      const linkPath = join(workingDir, '.terraine-todos.md');
-      const targetPath = join(this.todosStorePath, `${sessionId}.md`);
-
-      // Remove existing link if it exists
-      if (existsSync(linkPath)) {
-        try {
-          const stats = lstatSync(linkPath);
-          if (stats.isSymbolicLink()) {
-            rmSync(linkPath);
-            console.log(`🔗 Removed existing todos link: ${linkPath}`);
-          } else {
-            // If it's a regular file, don't remove it - that would be destructive
-            this.sendHttpError(res, 409, 'Cannot switch session: .terraine-todos.md exists as a regular file');
-            return;
-          }
-        } catch (linkError) {
-          console.error(`Warning: Error checking/removing existing link: ${linkError.message}`);
-        }
-      }
-
       // Create todos file if it doesn't exist
+      const targetPath = join(this.todosStorePath, `${sessionId}.md`);
       if (!existsSync(targetPath)) {
         this.createTodosFileForSession(sessionId);
       }
 
-      // Create symbolic link
-      try {
-        symlinkSync(targetPath, linkPath);
-        console.log(`🔗 Created todos link: ${linkPath} -> ${targetPath}`);
-      } catch (symlinkError) {
-        console.error(`Error creating symbolic link: ${symlinkError.message}`);
-        this.sendHttpError(res, 500, 'Failed to create todos symbolic link');
-        return;
+      // Update the symlink to point to this session
+      this.updateTodosSymlink(sessionId);
+
+      // Check if symlink update failed due to regular file conflict
+      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
+      const linkPath = join(workingDir, '.terraine-todos.md');
+      if (existsSync(linkPath)) {
+        try {
+          const stats = lstatSync(linkPath);
+          if (!stats.isSymbolicLink()) {
+            this.sendHttpError(res, 409, 'Cannot switch session: .terraine-todos.md exists as a regular file');
+            return;
+          }
+        } catch (linkError) {
+          this.sendHttpError(res, 500, 'Failed to create todos symbolic link');
+          return;
+        }
       }
 
       // Return success response
@@ -701,30 +692,102 @@ class WebSocketAgentServer {
 
     try {
       const todosFilePath = join(this.todosStorePath, `${sessionId}.md`);
-      const todosTemplate = `# Terraine Session Todos
+      const todosTemplate = `# terraine.ai TODOs
 
-Session ID: \`${sessionId}\`
 Created: ${new Date().toISOString()}
 
-This file helps the agent plan and track tasks for the current session.
-
-## Current Tasks
-
-- [ ] No tasks yet - add your goals here
-
-## Completed Tasks
-
-(Tasks will be moved here when completed)
-
----
-
-*This file was auto-created for session tracking. You can edit it manually or let the agent update it.*
 `;
 
       writeFileSync(todosFilePath, todosTemplate, 'utf-8');
       console.log(`📝 Created todos file for session: ${todosFilePath}`);
     } catch (error) {
       console.error(`❌ Failed to create todos file for session ${sessionId}: ${error.message}`);
+    }
+  }
+
+  private updateTodosSymlink(sessionId: string): void {
+    if (!this.todosStorePath) {
+      console.log('⚠️  Cannot update todos symlink: TODOS_STORE_PATH not configured');
+      return;
+    }
+
+    try {
+      // Get working directory
+      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
+      const linkPath = join(workingDir, '.terraine-todos.md');
+      const targetPath = join(this.todosStorePath, `${sessionId}.md`);
+
+      // Remove existing link if it exists
+      if (existsSync(linkPath)) {
+        try {
+          const stats = lstatSync(linkPath);
+          if (stats.isSymbolicLink()) {
+            rmSync(linkPath);
+            console.log(`🔗 Removed existing todos link: ${linkPath}`);
+          } else {
+            // If it's a regular file, don't remove it - just log a warning
+            console.warn(`⚠️  Cannot update symlink: .terraine-todos.md exists as a regular file`);
+            return;
+          }
+        } catch (linkError) {
+          console.error(`Warning: Error checking/removing existing link: ${linkError.message}`);
+        }
+      }
+
+      // Create symbolic link
+      try {
+        symlinkSync(targetPath, linkPath);
+        console.log(`🔗 Updated todos symlink: ${linkPath} -> ${targetPath}`);
+      } catch (symlinkError) {
+        console.error(`Error creating symbolic link: ${symlinkError.message}`);
+      }
+
+    } catch (error) {
+      console.error(`❌ Failed to update todos symlink for session ${sessionId}: ${error.message}`);
+    }
+  }
+
+  private cleanupSymlinkIfPointsToSession(sessionId: string): void {
+    if (!this.todosStorePath) {
+      return;
+    }
+
+    try {
+      // Get working directory and symlink path
+      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
+      const linkPath = join(workingDir, '.terraine-todos.md');
+      const expectedTargetPath = join(this.todosStorePath, `${sessionId}.md`);
+
+      // Check if symlink exists
+      if (existsSync(linkPath)) {
+        try {
+          const stats = lstatSync(linkPath);
+          if (stats.isSymbolicLink()) {
+            // Read the symlink target
+            const currentTarget = readlinkSync(linkPath);
+            
+            // Check if it points to this session's todos file (handle both relative and absolute paths)
+            const absoluteCurrentTarget = resolve(workingDir, currentTarget);
+            const absoluteExpectedTarget = resolve(expectedTargetPath);
+            
+            if (absoluteCurrentTarget === absoluteExpectedTarget) {
+              rmSync(linkPath);
+              console.log(`🔗 Cleaned up symlink pointing to deleted session: ${linkPath}`);
+            }
+          }
+        } catch (linkError) {
+          // Symlink might be broken, try to remove it anyway
+          try {
+            rmSync(linkPath);
+            console.log(`🔗 Cleaned up broken symlink: ${linkPath}`);
+          } catch (removeError) {
+            console.error(`Warning: Could not clean up symlink: ${removeError.message}`);
+          }
+        }
+      }
+
+    } catch (error) {
+      console.error(`❌ Failed to cleanup symlink for session ${sessionId}: ${error.message}`);
     }
   }
 
