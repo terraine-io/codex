@@ -641,8 +641,10 @@ The server provides REST endpoints for accessing session data:
 - Returns full session data including all events
 - Returns `404 Not Found` if session doesn't exist
 
-**DELETE /sessions/{sessionId}** - Delete a session
-- Permanently deletes the session file
+**DELETE /sessions/{sessionId}** - Archive a session
+- Archives the session file and associated todos file by moving them to hidden files with ISO timestamps
+- Session file: `{sessionId}.jsonl` → `.{sessionId}-{timestamp}.jsonl`
+- Todos file: `{sessionId}.md` → `.{sessionId}-{timestamp}.md` (if exists)
 - Returns `204 No Content` on success
 - Returns `404 Not Found` if session doesn't exist
 - Returns `409 Conflict` if trying to delete an active session
@@ -669,7 +671,7 @@ curl http://localhost:8080/sessions
 # Get specific session data
 curl http://localhost:8080/sessions/a1b2c3d4e5f6789012345678901234567890abcd
 
-# Delete a session
+# Archive a session
 curl -X DELETE http://localhost:8080/sessions/a1b2c3d4e5f6789012345678901234567890abcd
 
 # Switch to a session context

@@ -3,7 +3,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
-import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync, renameSync } from 'fs';
 import { basename, join } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
@@ -346,7 +346,7 @@ class WebSocketAgentServer {
     console.log(`📡 HTTP ${method} ${pathname}`);
 
     if (method === 'GET' && pathname === '/sessions') {
-      this.handleGetSessions(req, res);
+      this.handleListSessions(req, res);
     } else if (method === 'POST' && pathname === '/sessions') {
       this.handleCreateSession(req, res);
     } else if (method === 'GET' && pathname.startsWith('/sessions/')) {
@@ -371,7 +371,7 @@ class WebSocketAgentServer {
     }
   }
 
-  private handleGetSessions(req: IncomingMessage, res: ServerResponse): void {
+  private handleListSessions(req: IncomingMessage, res: ServerResponse): void {
     try {
       const sessions = this.loadSessionsList();
       this.sendJsonResponse(res, 200, { sessions });
@@ -413,7 +413,7 @@ class WebSocketAgentServer {
       }
 
       const files = readdirSync(this.sessionStorePath);
-      const sessionFiles = files.filter(file => file.endsWith('.jsonl'));
+      const sessionFiles = files.filter(file => file.endsWith('.jsonl')).filter(file => !file.startsWith("."));
 
       const sessions: SessionInfo[] = [];
 
@@ -570,18 +570,33 @@ class WebSocketAgentServer {
         return;
       }
 
-      // Delete the session file
-      unlinkSync(sessionFile);
+      // Generate timestamp for archive files
+      const timestamp = new Date().toISOString();
 
-      console.log(`🗑️  Deleted session via API: ${sessionId}`);
+      // Archive the session file instead of deleting it
+      const archivedSessionFile = join(this.sessionStorePath, `.${sessionId}-${timestamp}.jsonl`);
+      renameSync(sessionFile, archivedSessionFile);
+      console.log(`📦 Archived session file: ${sessionFile} -> ${archivedSessionFile}`);
+
+      // Archive the todos file if it exists and todos storage is configured
+      if (this.todosStorePath) {
+        const todosFile = join(this.todosStorePath, `${sessionId}.md`);
+        if (existsSync(todosFile)) {
+          const archivedTodosFile = join(this.todosStorePath, `.${sessionId}-${timestamp}.md`);
+          renameSync(todosFile, archivedTodosFile);
+          console.log(`📦 Archived todos file: ${todosFile} -> ${archivedTodosFile}`);
+        }
+      }
+
+      console.log(`🗂️  Archived session via API: ${sessionId}`);
 
       // Return success with no content
       res.writeHead(204);
       res.end();
 
     } catch (error) {
-      console.error(`Error deleting session ${sessionId}:`, error);
-      this.sendHttpError(res, 500, 'Internal server error while deleting session');
+      console.error(`Error archiving session ${sessionId}:`, error);
+      this.sendHttpError(res, 500, 'Internal server error while archiving session');
     }
   }
 
@@ -960,21 +975,10 @@ This file helps the agent plan and track tasks for the current session.
       
       // Only create if it doesn't already exist
       if (!existsSync(todosFilePath)) {
-        const todosTemplate = `# Terraine Session Todos
+        const todosTemplate = `# terraine.ai TODOs
 
 Created: ${new Date().toISOString()}
 
-This file helps the agent plan and track tasks for the current session.
-
-## Current Tasks
-
-- [ ] No tasks yet - add your goals here
-
-## Completed Tasks
-
-(Tasks will be moved here when completed)
-
----
 
 `;
 
