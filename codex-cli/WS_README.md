@@ -703,6 +703,177 @@ curl -X POST http://localhost:8080/sessions/def456:switch
 # Agent context has switched to the new session
 ```
 
+## apply_patch Command Documentation
+
+The `apply_patch` command is a core feature of the AgentLoop system that allows LLMs to modify files using a structured patch format. Understanding how it works is crucial for troubleshooting patch application errors.
+
+### Control Flow: LLM Tool Call → apply_patch Execution
+
+When an LLM calls the shell tool with an `apply_patch` command:
+
+```json
+{"command":["apply_patch","<<'EOF'\n*** Begin Patch\n*** Update File: example.txt\n..."]}
+```
+
+**The execution flow is:**
+
+1. **Tool Detection**: `deriveCommandKey()` in `handle-exec-command.ts:47-49` identifies this as "apply_patch"
+2. **Approval Check**: `canAutoApproveApplyPatch()` in `approvals.ts` validates the patch based on approval policy
+3. **Special Routing**: `execCommand()` in `exec.ts:254-255` calls `execApplyPatch()` instead of regular shell execution
+4. **Direct Processing**: `execApplyPatch()` calls `process_patch()` from `apply-patch.ts:703` - **no shell execution involved**
+
+### Key Differences from Regular Shell Commands
+
+**apply_patch Special Treatment:**
+
+1. **No Shell Execution**: Unlike regular shell commands, apply_patch bypasses the shell entirely
+2. **Direct File Operations**: Uses Node.js `fs` operations for reading/writing files
+3. **Custom Parser**: Uses a specialized diff format parser instead of standard Unix diff
+4. **Enhanced Security**: Special approval logic validates file paths are within writable roots
+5. **Context-Based Matching**: Uses surrounding code context instead of line numbers for robust patching
+
+### AgentLoop Interface Architecture
+
+The system supports multiple LLM providers through a unified interface:
+
+#### **Multi-Provider Support**
+- **OpenAI AgentLoop**: Traditional function calls via `shellFunctionTool` (lines 88-110 in `agent-loop.ts`)
+- **Claude AgentLoop**: Tool use calls via `claudeShellTool` (lines 14-36 in `claude-tools.ts`)
+- **Unified Processing**: Both providers route through the same `handleExecCommand()` function
+
+#### **Provider Detection**
+- Auto-detection based on model name in `agent-loop-factory.ts:78-89`
+- `claude-` prefix routes to Anthropic provider
+- Both implement `IAgentLoop` interface for consistency
+
+### Patch Format Requirements
+
+The apply_patch command expects a very specific format. **Common errors occur when the format is incorrect.**
+
+#### **Valid Patch Structure**
+
+**For updating existing files:**
+```
+*** Begin Patch
+*** Update File: path/to/file.txt
+[existing_line_1]
+[existing_line_2]  
+[existing_line_3]
+- old_line_to_replace
++ new_line_replacement
+[existing_line_4]
+[existing_line_5]
+*** End Patch
+```
+
+**For adding new files:**
+```
+*** Begin Patch
+*** Add File: path/to/newfile.txt
++ First line of new file
++ Second line of new file
++ Third line of new file
+*** End Patch
+```
+
+**For deleting files:**
+```
+*** Begin Patch
+*** Delete File: path/to/unwanted.txt
+*** End Patch
+```
+
+#### **Context Requirements**
+
+- **3 lines of context** before and after each change (default)
+- **@@ markers** for function/class context when needed:
+  ```
+  @@ class MyClass
+  @@     def method():
+  [3 lines of context]
+  - old_code
+  + new_code
+  [3 lines of context]
+  ```
+- **No line numbers** - the parser uses context matching instead
+
+### Common Error: "Invalid Context"
+
+The error "Invalid Context 0:" occurs when the patch format is malformed. 
+
+**Example of INCORRECT patch that causes this error:**
+```
+*** Update File: .terraine-todos.md
+# terraine.ai TODOs
+
+Created: 2025-06-11T23:47:48.107Z
+
++ ## Phase 1: Understand Requirements & Current State
++ - [ ] Review existing chip data pipeline components
+```
+
+**Problems with this patch:**
+1. **Missing context lines**: No existing file content shown for context matching
+2. **No diff structure**: Only additions (`+` lines) without showing what they're replacing
+3. **Invalid format**: The parser expects existing content as context before changes
+
+**Correct approach for adding content:**
+
+If the file exists:
+```
+*** Update File: .terraine-todos.md
+# terraine.ai TODOs
+
+Created: 2025-06-11T23:47:48.107Z
+
++ ## Phase 1: Understand Requirements & Current State
++ - [ ] Review existing chip data pipeline components
+```
+
+If it's a new file:
+```
+*** Add File: .terraine-todos.md
++ # terraine.ai TODOs
++ 
++ Created: 2025-06-11T23:47:48.107Z
++ 
++ ## Phase 1: Understand Requirements & Current State
++ - [ ] Review existing chip data pipeline components
+```
+
+### Parser Implementation Details
+
+The patch parser (`apply-patch.ts`) includes several sophisticated features:
+
+1. **Unicode Normalization** (lines 355-381): Handles Unicode punctuation variants
+2. **Fuzzy Matching** (lines 332-450): Three-pass matching system:
+   - Exact match after canonicalization
+   - Ignore trailing whitespace  
+   - Ignore all surrounding whitespace
+3. **Context-based Positioning**: Uses `@@` markers and surrounding code instead of line numbers
+4. **Error Location**: The "Invalid Context" error occurs in `find_context()` at line 294
+
+### Debugging Patch Errors
+
+When patch application fails:
+
+1. **Check Format**: Ensure proper `*** Begin Patch` and `*** End Patch` markers
+2. **Verify Context**: Include sufficient existing file content as context
+3. **Validate Paths**: Ensure file paths are relative, not absolute
+4. **Test Manually**: The apply_patch tool can be run standalone for testing
+5. **Check Approval**: Verify the patch passes approval policy checks
+
+### Security and Approval Integration
+
+The apply_patch system integrates with the approval framework:
+
+- **Approval Policies**: `canAutoApproveApplyPatch()` validates patches based on approval mode
+- **Path Validation**: Ensures files are within approved writable directories
+- **File Extraction**: Uses `identify_files_needed()` and `identify_files_added()` for approval checks
+- **Sandboxing**: When approved, executes with restricted file system access
+
+This comprehensive apply_patch system provides robust, secure file modification capabilities while maintaining compatibility across different LLM providers and approval policies.
+
 ## Development
 
 To extend the server:
