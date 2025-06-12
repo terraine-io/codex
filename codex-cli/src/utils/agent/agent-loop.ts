@@ -31,6 +31,7 @@ import {
   setSessionId,
 } from "../session.js";
 import { applyPatchToolInstructions } from "./apply-patch.js";
+import { readChunkToolInstructions } from "./exec.js";
 import { handleExecCommand } from "./handle-exec-command.js";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { spawnSync } from "node:child_process";
@@ -810,7 +811,10 @@ export class AgentLoop implements IAgentLoop {
               reasoning.summary = "auto";
             }
             if (this.model.startsWith("gpt-4.1")) {
-              modelSpecificInstructions = applyPatchToolInstructions;
+              modelSpecificInstructions = [
+                applyPatchToolInstructions,
+                readChunkToolInstructions
+              ].join('\n\n');
             }
             const mergedInstructions = [
               prefix,

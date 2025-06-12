@@ -13,6 +13,11 @@ export type SafetyAssessment = {
    * arguments.
    */
   applyPatch?: ApplyPatchCommand;
+  /**
+   * If set, this approval is for a read_chunk call and these are the
+   * arguments.
+   */
+  readChunk?: ReadChunkCommand;
 } & (
   | {
       type: "auto-approve";
@@ -40,6 +45,12 @@ export type SafetyAssessment = {
 // TODO: This should also contain the paths that will be affected.
 export type ApplyPatchCommand = {
   patch: string;
+};
+
+export type ReadChunkCommand = {
+  fileName: string;
+  chunkStartLine: number;
+  chunkEndLine: number;
 };
 
 export type ApprovalPolicy =
@@ -83,6 +94,27 @@ export function canAutoApprove(
           type: "reject",
           reason: "Invalid apply_patch command",
         };
+  }
+
+  if (command[0] === "read_chunk") {
+    if (
+      command.length === 4 &&
+      typeof command[1] === "string" &&
+      typeof command[2] === "string" &&
+      typeof command[3] === "string"
+    ) {
+      return canAutoApproveReadChunk(
+        command[1],
+        parseInt(command[2], 10),
+        parseInt(command[3], 10),
+        workdir,
+      );
+    }
+    
+    return {
+      type: "reject",
+      reason: "Invalid read_chunk command - requires: read_chunk <file> <start_line> <end_line>",
+    };
   }
 
   const isSafe = isSafeCommand(command);
@@ -214,6 +246,57 @@ function canAutoApproveApplyPatch(
         type: "ask-user",
         applyPatch: { patch: applyPatchArg },
       };
+}
+
+function canAutoApproveReadChunk(
+  fileName: string,
+  chunkStartLine: number,
+  chunkEndLine: number,
+  workdir: string | undefined,
+): SafetyAssessment {
+  // Validate line numbers are positive integers
+  if (
+    !Number.isInteger(chunkStartLine) ||
+    !Number.isInteger(chunkEndLine) ||
+    chunkStartLine < 1 ||
+    chunkEndLine < 1
+  ) {
+    return {
+      type: "reject",
+      reason: "Invalid line numbers - must be positive integers starting from 1",
+    };
+  }
+
+  if (chunkStartLine > chunkEndLine) {
+    return {
+      type: "reject", 
+      reason: "Start line must be less than or equal to end line",
+    };
+  }
+
+  // Validate file path safety (no path traversal)
+  try {
+    resolvePathAgainstWorkdir(fileName, workdir);
+  } catch {
+    return {
+      type: "reject",
+      reason: "Invalid file path - potential path traversal detected",
+    };
+  }
+
+  // read_chunk is a read-only operation, so it's safe to auto-approve
+  // in all approval policies since it doesn't modify anything
+  return {
+    type: "auto-approve",
+    reason: "read_chunk is a safe read-only operation",
+    group: "Reading",
+    runInSandbox: false,
+    readChunk: {
+      fileName,
+      chunkStartLine,
+      chunkEndLine,
+    },
+  };
 }
 
 /**

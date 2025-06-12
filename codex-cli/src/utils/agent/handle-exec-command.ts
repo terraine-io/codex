@@ -1,5 +1,5 @@
 import type { CommandConfirmation } from "./agent-loop.js";
-import type { ApplyPatchCommand, ApprovalPolicy } from "../../approvals.js";
+import type { ApplyPatchCommand, ApprovalPolicy, ReadChunkCommand } from "../../approvals.js";
 import type { ExecInput } from "./sandbox/interface.js";
 import type { ResponseInputItem } from "openai/resources/responses/responses.mjs";
 
@@ -7,7 +7,7 @@ import { canAutoApprove } from "../../approvals.js";
 import { formatCommandForDisplay } from "../../format-command.js";
 import { FullAutoErrorMode } from "../auto-approval-mode.js";
 import { CODEX_UNSAFE_ALLOW_NO_SANDBOX, type AppConfig } from "../config.js";
-import { exec, execApplyPatch } from "./exec.js";
+import { exec, execApplyPatch, execReadChunk } from "./exec.js";
 import { ReviewDecision } from "./review.js";
 import { isLoggingEnabled, log } from "../logger/log.js";
 import { SandboxType } from "./sandbox/interface.js";
@@ -48,6 +48,10 @@ function deriveCommandKey(cmd: Array<string>): string {
     return "apply_patch";
   }
 
+  if (coreInvocation?.startsWith("read_chunk")) {
+    return "read_chunk";
+  }
+
   if (maybeShell === "bash" && maybeFlag === "-lc") {
     // If the command was invoked through `bash -lc "<script>"` we extract the
     // base program name from the script string.
@@ -79,6 +83,7 @@ export async function handleExecCommand(
   getCommandConfirmation: (
     command: Array<string>,
     applyPatch: ApplyPatchCommand | undefined,
+    readChunk?: ReadChunkCommand | undefined,
   ) => Promise<CommandConfirmation>,
   abortSignal?: AbortSignal,
 ): Promise<HandleExecCommandResult> {
@@ -92,6 +97,7 @@ export async function handleExecCommand(
     return execCommand(
       args,
       /* applyPatch */ undefined,
+      /* readChunk */ undefined,
       /* runInSandbox */ false,
       additionalWritableRoots,
       config,
@@ -113,6 +119,7 @@ export async function handleExecCommand(
       const review = await askUserPermission(
         args,
         safety.applyPatch,
+        safety.readChunk,
         getCommandConfirmation,
       );
       if (review != null) {
@@ -137,10 +144,11 @@ export async function handleExecCommand(
     }
   }
 
-  const { applyPatch } = safety;
+  const { applyPatch, readChunk } = safety;
   const summary = await execCommand(
     args,
     applyPatch,
+    readChunk,
     runInSandbox,
     additionalWritableRoots,
     config,
@@ -169,6 +177,7 @@ export async function handleExecCommand(
     const review = await askUserPermission(
       args,
       safety.applyPatch,
+      safety.readChunk,
       getCommandConfirmation,
     );
     if (review != null) {
@@ -179,6 +188,7 @@ export async function handleExecCommand(
       const summary = await execCommand(
         args,
         applyPatch,
+        /* readChunk */ undefined,
         false,
         additionalWritableRoots,
         config,
@@ -214,6 +224,7 @@ type ExecCommandSummary = {
 async function execCommand(
   execInput: ExecInput,
   applyPatchCommand: ApplyPatchCommand | undefined,
+  readChunkCommand: ReadChunkCommand | undefined,
   runInSandbox: boolean,
   additionalWritableRoots: ReadonlyArray<string>,
   config: AppConfig,
@@ -231,6 +242,8 @@ async function execCommand(
 
   if (applyPatchCommand != null) {
     log("EXEC running apply_patch command");
+  } else if (readChunkCommand != null) {
+    log(`EXEC running read_chunk command: ${readChunkCommand.fileName} lines ${readChunkCommand.chunkStartLine}-${readChunkCommand.chunkEndLine}`);
   } else if (isLoggingEnabled()) {
     const { cmd, timeoutInMillis } = execInput;
     // Seconds are a bit easier to read in log messages and most timeouts
@@ -246,19 +259,29 @@ async function execCommand(
     );
   }
 
-  // Note execApplyPatch() and exec() are coded defensively and should not
+  // Note execApplyPatch(), execReadChunk(), and exec() are coded defensively and should not
   // throw. Any internal errors should be mapped to a non-zero value for the
   // exitCode field.
   const start = Date.now();
-  const execResult =
-    applyPatchCommand != null
-      ? execApplyPatch(applyPatchCommand.patch, workdir)
-      : await exec(
-          { ...execInput, additionalWritableRoots },
-          await getSandbox(runInSandbox),
-          config,
-          abortSignal,
-        );
+  let execResult;
+  
+  if (applyPatchCommand != null) {
+    execResult = execApplyPatch(applyPatchCommand.patch, workdir);
+  } else if (readChunkCommand != null) {
+    execResult = execReadChunk(
+      readChunkCommand.fileName,
+      readChunkCommand.chunkStartLine,
+      readChunkCommand.chunkEndLine,
+      workdir,
+    );
+  } else {
+    execResult = await exec(
+      { ...execInput, additionalWritableRoots },
+      await getSandbox(runInSandbox),
+      config,
+      abortSignal,
+    );
+  }
   const duration = Date.now() - start;
   const { stdout, stderr, exitCode } = execResult;
 
@@ -332,14 +355,17 @@ async function getSandbox(runInSandbox: boolean): Promise<SandboxType> {
 async function askUserPermission(
   args: ExecInput,
   applyPatchCommand: ApplyPatchCommand | undefined,
+  readChunkCommand: ReadChunkCommand | undefined,
   getCommandConfirmation: (
     command: Array<string>,
     applyPatch: ApplyPatchCommand | undefined,
+    readChunk?: ReadChunkCommand | undefined,
   ) => Promise<CommandConfirmation>,
 ): Promise<HandleExecCommandResult | null> {
   const { review: decision, customDenyMessage } = await getCommandConfirmation(
     args.cmd,
     applyPatchCommand,
+    readChunkCommand,
   );
 
   if (decision === ReviewDecision.ALWAYS) {

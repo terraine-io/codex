@@ -16,6 +16,7 @@ import {
 } from "./claude-types.js";
 import { getClaudeTools, executeClaudeTool, type ClaudeToolContext } from "./claude-tools.js";
 import { applyPatchToolInstructions } from "./apply-patch.js";
+import { readChunkToolInstructions } from "./exec.js";
 import { randomUUID } from "crypto";
 import { log, debug, trace, isLevelEnabled, LogLevel } from "../logger/log.js";
 
@@ -347,9 +348,10 @@ export class ClaudeAgentLoop implements IAgentLoop {
       });
     }
 
-    // Prepare system instructions, including apply_patch instructions for Claude models
+    // Prepare system instructions, including tool-specific instructions for Claude models
     const systemInstructions = [
       applyPatchToolInstructions, // Always include for Claude models
+      readChunkToolInstructions,  // Always include for Claude models
       this.instructions
     ].filter(Boolean).join('\n\n');
 

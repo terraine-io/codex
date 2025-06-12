@@ -79,6 +79,87 @@ export function exec(
   }
 }
 
+export function execReadChunk(
+  fileName: string,
+  chunkStartLine: number,
+  chunkEndLine: number,
+  workdir: string | undefined = undefined,
+): ExecResult {
+  try {
+    // Resolve the file path against workdir to prevent path traversal
+    const resolvedPath = resolvePathAgainstWorkdir(fileName, workdir);
+    
+    // Validate line numbers (must be positive integers)
+    if (chunkStartLine < 1 || chunkEndLine < 1) {
+      return {
+        stdout: "",
+        stderr: "Error: Line numbers must be positive integers (starting from 1)",
+        exitCode: 1,
+      };
+    }
+    
+    if (chunkStartLine > chunkEndLine) {
+      return {
+        stdout: "",
+        stderr: "Error: Start line must be less than or equal to end line",
+        exitCode: 1,
+      };
+    }
+
+    // Check if file exists and is readable
+    try {
+      fs.accessSync(resolvedPath, fs.constants.R_OK);
+    } catch {
+      return {
+        stdout: "",
+        stderr: `Error: Cannot read file '${fileName}' (file not found or not readable)`,
+        exitCode: 1,
+      };
+    }
+
+    // Read the file content
+    const fileContent = fs.readFileSync(resolvedPath, "utf8");
+    const lines = fileContent.split("\n");
+    const totalLines = lines.length;
+    
+    // Build output with line numbers
+    let output = "";
+    let hitEOF = false;
+    
+    for (let lineNum = chunkStartLine; lineNum <= chunkEndLine; lineNum++) {
+      const arrayIndex = lineNum - 1; // Convert to 0-based index
+      
+      if (arrayIndex >= totalLines) {
+        hitEOF = true;
+        break;
+      }
+      
+      const lineContent = lines[arrayIndex] || "";
+      output += `${lineNum.toString().padStart(6, " ")}\t${lineContent}\n`;
+    }
+    
+    // Add EOF marker if we went beyond the file
+    if (hitEOF) {
+      output += "-----EOF-----\n";
+    }
+    
+    return {
+      stdout: output,
+      stderr: "",
+      exitCode: 0,
+    };
+    
+  } catch (error: unknown) {
+    // @ts-expect-error error might not be an object or have a message property.
+    const stderr = `Error reading file chunk: ${String(error.message ?? error)}`;
+    return {
+      stdout: "",
+      stderr: stderr,
+      exitCode: 1,
+    };
+  }
+}
+
 export function execApplyPatch(
   patchText: string,
   workdir: string | undefined = undefined,
@@ -136,3 +217,49 @@ export function getBaseCmd(cmd: Array<string>): string {
   const formattedCommand = formatCommandForDisplay(cmd);
   return formattedCommand.split(" ")[0] || cmd[0] || "<unknown>";
 }
+
+export const readChunkToolInstructions = `
+To read specific chunks/sections of text files, use the \`shell\` tool with \`read_chunk\` CLI. This command allows you to efficiently read portions of large files without loading the entire content. The read_chunk tool is designed specifically for text files and provides line-numbered output for easy navigation.
+
+**Command Structure:**
+\`\`\`bash
+{"cmd": ["read_chunk", "file_name", "start_line", "end_line"], "workdir": "..."}
+\`\`\`
+
+**Arguments:**
+- \`file_name\`: Path to the text file to read (relative paths only, no path traversal)
+- \`start_line\`: First line to display (starting from 1, inclusive)  
+- \`end_line\`: Last line to display (inclusive)
+
+**Output Format:**
+- Each line is prefixed with its line number (6-digit padded)
+- Format: \`    42\tline content here\`
+- If the requested range exceeds the file length, output ends with \`-----EOF-----\`
+
+**Examples:**
+\`\`\`bash
+# Read lines 1-50 of a config file
+{"cmd": ["read_chunk", "config/settings.json", "1", "50"]}
+
+# Read lines 100-200 from a source file  
+{"cmd": ["read_chunk", "src/main.py", "100", "200"]}
+
+# Read the last portion of a log file (if you know it has ~500 lines)
+{"cmd": ["read_chunk", "app.log", "450", "500"]}
+\`\`\`
+
+**Error Handling:**
+- Invalid line numbers (non-positive): Returns error message
+- Start line > end line: Returns error message  
+- File not found/readable: Returns error message
+- Binary files: May produce garbled output (use only with text files)
+
+**Use Cases:**
+- Inspecting specific functions or classes in source files
+- Reading configuration file sections
+- Examining error contexts in log files
+- Reviewing specific parts of documentation
+- Analyzing data file headers/sections
+
+**Security:** This is a read-only operation that's automatically approved for all file paths within the working directory.
+`;
