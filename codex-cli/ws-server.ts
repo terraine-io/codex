@@ -695,7 +695,7 @@ class WebSocketAgentServer {
 
       // Check if symlink update failed due to regular file conflict
       const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
-      const linkPath = join(workingDir, '.terraine-todos.md');
+      const linkPath = join(workingDir, '.terraine', 'todos.md');
       if (existsSync(linkPath)) {
         try {
           const stats = lstatSync(linkPath);
@@ -774,7 +774,7 @@ Created: ${new Date().toISOString()}
     try {
       // Get working directory
       const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
-      const linkPath = join(workingDir, '.terraine-todos.md');
+      const linkPath = join(workingDir, '.terraine', 'todos.md');
       const targetPath = join(this.todosStorePath, `${sessionId}.md`);
 
       // Remove existing link if it exists
@@ -786,7 +786,7 @@ Created: ${new Date().toISOString()}
             console.log(`🔗 Removed existing todos link: ${linkPath}`);
           } else {
             // If it's a regular file, don't remove it - just log a warning
-            console.warn(`⚠️  Cannot update symlink: .terraine-todos.md exists as a regular file`);
+            console.warn(`⚠️  Cannot update symlink: .terraine/todos.md exists as a regular file`);
             return;
           }
         } catch (linkError) {
@@ -815,7 +815,7 @@ Created: ${new Date().toISOString()}
     try {
       // Get working directory and symlink path
       const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
-      const linkPath = join(workingDir, '.terraine-todos.md');
+      const linkPath = join(workingDir, '.terraine', 'todos.md');
       const expectedTargetPath = join(this.todosStorePath, `${sessionId}.md`);
 
       // Check if symlink exists
@@ -1268,8 +1268,9 @@ Created: ${new Date().toISOString()}
   }
 
   private initializeConnectorsStorage(): void {
-    const connectorsStorePath = process.env.CONNECTORS_STORE_PATH;
-    const uploadedFilesPath = process.env.UPLOADED_FILES_PATH;
+    const workingDir = process.env.WORKING_DIRECTORY;
+    const connectorsStorePath = join(workingDir, '.terraine', 'connectors.jsonl');
+    const uploadedFilesPath = join(workingDir, '.terraine', 'uploads');
 
     if (!connectorsStorePath) {
       console.log('⚠️  CONNECTORS_STORE_PATH not configured, connectors disabled');
