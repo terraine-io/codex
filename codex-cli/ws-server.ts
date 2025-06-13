@@ -3,8 +3,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
-import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync, renameSync, readlinkSync } from 'fs';
-import { basename, join, resolve } from 'path';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync, renameSync, readlinkSync, createWriteStream } from 'fs';
+import { basename, join, resolve, extname } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
@@ -156,6 +156,27 @@ interface ArtifactsIndex {
   artifacts: ArtifactItem[];
 }
 
+// Types for data connectors
+interface DataConnector {
+  id: string;
+  name: string;
+  type: 'local_file';
+  config: {
+    file_path?: string; // Optional until file is uploaded
+    filename?: string; // Filename to use when saving uploaded content
+    file_type?: 'text' | 'csv' | 'json' | 'binary';
+    encoding?: string;
+  };
+  status: 'pending_upload' | 'active' | 'inactive' | 'error';
+  created_at: string;
+  last_used?: string;
+  metadata?: {
+    file_size?: number;
+    mime_type?: string;
+    last_modified?: string;
+  };
+}
+
 // Types for session management
 interface SessionEvent {
   timestamp: string;
@@ -187,6 +208,8 @@ class WebSocketAgentServer {
   private currentSessionId: string | null = null;
   private sessionStorePath: string | null = null;
   private todosStorePath: string | null = null;
+  private connectorsStorePath: string | null = null;
+  private uploadedFilesPath: string | null = null;
   private messageFragments: Map<string, ResponseItem[]> = new Map();
 
   // Fragment collection for turn-based message logging:
@@ -205,6 +228,9 @@ class WebSocketAgentServer {
     
     // Initialize todos storage
     this.initializeTodosStorage();
+    
+    // Initialize connectors storage
+    this.initializeConnectorsStorage();
 
     // Create HTTP server first
     this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
@@ -366,6 +392,40 @@ class WebSocketAgentServer {
       }
     } else if (method === 'GET' && pathname === '/artifacts') {
       this.handleGetArtifacts(req, res);
+    } else if (method === 'GET' && pathname === '/connectors') {
+      this.handleListConnectors(req, res);
+    } else if (method === 'POST' && pathname === '/connectors') {
+      this.handleCreateConnector(req, res);
+    } else if (method === 'GET' && pathname.startsWith('/connectors/')) {
+      const pathParts = pathname.split('/');
+      if (pathParts.length === 3) {
+        // GET /connectors/{id}
+        const connectorId = pathParts[2];
+        this.handleGetConnector(connectorId, req, res);
+      } else if (pathParts.length === 4 && pathParts[3] === 'content') {
+        // GET /connectors/{id}/content
+        const connectorId = pathParts[2];
+        this.handleGetConnectorContent(connectorId, req, res);
+      } else {
+        this.sendHttpError(res, 404, 'Not Found');
+      }
+    } else if (method === 'DELETE' && pathname.startsWith('/connectors/')) {
+      const pathParts = pathname.split('/');
+      if (pathParts.length === 3) {
+        const connectorId = pathParts[2];
+        this.handleDeleteConnector(connectorId, req, res);
+      } else {
+        this.sendHttpError(res, 404, 'Not Found');
+      }
+    } else if (method === 'POST' && pathname.includes(':upload')) {
+      // Handle POST /connectors/{connector_id}:upload
+      const match = pathname.match(/^\/connectors\/([^:]+):upload$/);
+      if (match) {
+        const connectorId = match[1];
+        this.handleUploadToConnector(connectorId, req, res);
+      } else {
+        this.sendHttpError(res, 400, 'Invalid upload path format');
+      }
     } else {
       this.sendHttpError(res, 404, 'Not Found');
     }
@@ -820,6 +880,335 @@ Created: ${new Date().toISOString()}
     }
   }
 
+  private handleListConnectors(req: IncomingMessage, res: ServerResponse): void {
+    try {
+      if (!this.connectorsStorePath) {
+        this.sendHttpError(res, 503, 'Connectors storage not configured');
+        return;
+      }
+
+      const connectors = this.loadConnectors();
+      this.sendJsonResponse(res, 200, { connectors });
+    } catch (error) {
+      console.error('Error handling /connectors request:', error);
+      this.sendHttpError(res, 500, 'Internal server error while loading connectors');
+    }
+  }
+
+  private handleCreateConnector(req: IncomingMessage, res: ServerResponse): void {
+    if (!this.connectorsStorePath) {
+      this.sendHttpError(res, 503, 'Connectors storage not configured');
+      return;
+    }
+
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+
+    req.on('end', () => {
+      try {
+        const requestData = JSON.parse(body);
+        
+        // Validate required fields
+        if (!requestData.name) {
+          this.sendHttpError(res, 400, 'Missing required field: name');
+          return;
+        }
+
+        // Always create connector in pending_upload state - files must be uploaded separately
+        const connector: DataConnector = {
+          id: this.generateConnectorId(),
+          name: requestData.name,
+          type: 'local_file',
+          config: {
+            filename: requestData.filename,
+            file_type: requestData.file_type,
+            encoding: requestData.encoding || 'utf-8'
+          },
+          status: 'pending_upload',
+          created_at: new Date().toISOString()
+        };
+
+        // Save connector
+        this.saveConnector(connector);
+        
+        console.log(`✅ Created connector: ${connector.id} (${connector.name}) - Status: ${connector.status}`);
+        this.sendJsonResponse(res, 201, connector);
+
+      } catch (parseError) {
+        this.sendHttpError(res, 400, 'Invalid JSON in request body');
+      }
+    });
+  }
+
+  private handleGetConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
+    try {
+      // Validate connector ID format
+      if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
+        this.sendHttpError(res, 400, 'Invalid connector ID format');
+        return;
+      }
+
+      if (!this.connectorsStorePath) {
+        this.sendHttpError(res, 503, 'Connectors storage not configured');
+        return;
+      }
+
+      const connectors = this.loadConnectors();
+      const connector = connectors.find(c => c.id === connectorId);
+      
+      if (!connector) {
+        this.sendHttpError(res, 404, 'Connector not found');
+        return;
+      }
+
+      // Only check file existence if connector has a file path and is supposed to be active
+      if (connector.config.file_path && connector.status === 'active') {
+        try {
+          if (!existsSync(connector.config.file_path)) {
+            connector.status = 'error';
+          }
+        } catch (error) {
+          console.error(`Error checking file existence: ${error.message}`);
+          connector.status = 'error';
+        }
+      }
+
+      this.sendJsonResponse(res, 200, connector);
+    } catch (error) {
+      console.error(`Error handling GET /connectors/${connectorId} request:`, error);
+      this.sendHttpError(res, 500, 'Internal server error while loading connector');
+    }
+  }
+
+  private handleDeleteConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
+    try {
+      // Validate connector ID format
+      if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
+        this.sendHttpError(res, 400, 'Invalid connector ID format');
+        return;
+      }
+
+      if (!this.connectorsStorePath) {
+        this.sendHttpError(res, 503, 'Connectors storage not configured');
+        return;
+      }
+
+      const deleted = this.deleteConnectorFromStorage(connectorId);
+      
+      if (!deleted) {
+        this.sendHttpError(res, 404, 'Connector not found');
+        return;
+      }
+
+      console.log(`🗑️ Deleted connector: ${connectorId}`);
+      res.writeHead(204);
+      res.end();
+    } catch (error) {
+      console.error(`Error handling DELETE /connectors/${connectorId} request:`, error);
+      this.sendHttpError(res, 500, 'Internal server error while deleting connector');
+    }
+  }
+
+  private handleGetConnectorContent(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
+    try {
+      // Validate connector ID format
+      if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
+        this.sendHttpError(res, 400, 'Invalid connector ID format');
+        return;
+      }
+
+      if (!this.connectorsStorePath) {
+        this.sendHttpError(res, 503, 'Connectors storage not configured');
+        return;
+      }
+
+      const connectors = this.loadConnectors();
+      const connector = connectors.find(c => c.id === connectorId);
+      
+      if (!connector) {
+        this.sendHttpError(res, 404, 'Connector not found');
+        return;
+      }
+
+      if (connector.status !== 'active') {
+        this.sendHttpError(res, 409, `Connector is not active (status: ${connector.status})`);
+        return;
+      }
+
+      // Check if file exists
+      if (!connector.config.file_path || !existsSync(connector.config.file_path)) {
+        this.sendHttpError(res, 404, 'File not found');
+        return;
+      }
+
+      // Parse query parameters for chunking
+      const url = new URL(req.url || '', `http://${req.headers.host}`);
+      const offset = parseInt(url.searchParams.get('offset') || '0');
+      const limit = parseInt(url.searchParams.get('limit') || '0');
+      const bytesStart = parseInt(url.searchParams.get('bytes_start') || '0');
+      const bytesEnd = parseInt(url.searchParams.get('bytes_end') || '0');
+
+      try {
+        let content: string;
+        let chunkInfo: any = {};
+        
+        // Read file content
+        const fileContent = readFileSync(connector.config.file_path, connector.config.encoding || 'utf-8');
+        const metadata = this.getFileMetadata(connector.config.file_path);
+        
+        if (limit > 0) {
+          // Line-based chunking
+          const lines = fileContent.split('\n');
+          const endLine = offset + limit;
+          const selectedLines = lines.slice(offset, endLine);
+          content = selectedLines.join('\n');
+          
+          chunkInfo = {
+            offset,
+            limit,
+            total_lines: lines.length
+          };
+        } else if (bytesEnd > bytesStart) {
+          // Byte-based chunking
+          content = fileContent.substring(bytesStart, bytesEnd);
+          chunkInfo = {
+            bytes_start: bytesStart,
+            bytes_end: bytesEnd,
+            total_bytes: fileContent.length
+          };
+        } else {
+          // Full content
+          content = fileContent;
+        }
+
+        // Update last used timestamp
+        this.updateConnectorLastUsed(connectorId);
+
+        const response = {
+          connector_id: connectorId,
+          content,
+          encoding: connector.config.encoding || 'utf-8',
+          content_type: metadata?.mime_type || 'text/plain',
+          total_size: metadata?.file_size || 0,
+          ...(Object.keys(chunkInfo).length > 0 && { chunk_info: chunkInfo })
+        };
+
+        this.sendJsonResponse(res, 200, response);
+      } catch (readError) {
+        console.error(`Error reading file: ${readError.message}`);
+        this.sendHttpError(res, 500, 'Failed to read file content');
+      }
+    } catch (error) {
+      console.error(`Error handling GET /connectors/${connectorId}/content request:`, error);
+      this.sendHttpError(res, 500, 'Internal server error while reading connector content');
+    }
+  }
+
+  private handleUploadToConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
+    // Validate connector ID format
+    if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
+      this.sendHttpError(res, 400, 'Invalid connector ID format');
+      return;
+    }
+
+    if (!this.connectorsStorePath) {
+      this.sendHttpError(res, 503, 'Connectors storage not configured');
+      return;
+    }
+
+    if (!this.uploadedFilesPath) {
+      this.sendHttpError(res, 503, 'File uploads not configured');
+      return;
+    }
+
+    // Find the connector
+    const connectors = this.loadConnectors();
+    const connector = connectors.find(c => c.id === connectorId);
+    
+    if (!connector) {
+      this.sendHttpError(res, 404, 'Connector not found');
+      return;
+    }
+
+    if (connector.status !== 'pending_upload') {
+      this.sendHttpError(res, 409, 'Connector is not in pending_upload status');
+      return;
+    }
+
+    // Read simple POST body content
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+
+    req.on('end', () => {
+      try {
+        if (!body || body.trim().length === 0) {
+          this.sendHttpError(res, 400, 'Empty content body');
+          return;
+        }
+
+        // Use filename from connector config, or generate one if not specified
+        let filename: string;
+        if (connector.config.filename) {
+          // Use the filename specified during connector creation
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const ext = extname(connector.config.filename);
+          const baseName = basename(connector.config.filename, ext);
+          filename = `${connectorId}_${baseName}_${timestamp}${ext}`;
+        } else {
+          // Fallback to generated filename based on file type
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const fileExtension = connector.config.file_type === 'csv' ? '.csv' : 
+                               connector.config.file_type === 'json' ? '.json' : '.txt';
+          filename = `${connectorId}_${timestamp}${fileExtension}`;
+        }
+        const filePath = join(this.uploadedFilesPath, filename);
+
+        // Write file content
+        writeFileSync(filePath, body, connector.config.encoding || 'utf-8');
+
+        // Get file metadata
+        const metadata = this.getFileMetadata(filePath);
+        if (!metadata) {
+          this.sendHttpError(res, 500, 'Failed to read uploaded file metadata');
+          return;
+        }
+
+        // Update connector with file information
+        const updates: Partial<DataConnector> = {
+          config: {
+            ...connector.config,
+            file_path: filePath,
+            file_type: connector.config.file_type || this.detectFileType(filePath, metadata.mime_type)
+          },
+          status: 'active',
+          metadata
+        };
+
+        const updateSuccess = this.updateConnectorInStorage(connectorId, updates);
+        if (!updateSuccess) {
+          this.sendHttpError(res, 500, 'Failed to update connector');
+          return;
+        }
+
+        // Get updated connector to return
+        const updatedConnectors = this.loadConnectors();
+        const updatedConnector = updatedConnectors.find(c => c.id === connectorId);
+        
+        console.log(`✅ Uploaded content to connector: ${connectorId} (${connector.name})`);
+        this.sendJsonResponse(res, 200, updatedConnector);
+
+      } catch (writeError) {
+        console.error('Error writing uploaded content:', writeError);
+        this.sendHttpError(res, 500, 'Failed to save uploaded content');
+      }
+    });
+  }
+
+
   private sendJsonResponse(res: ServerResponse, statusCode: number, data: any): void {
     res.setHeader('Content-Type', 'application/json');
     res.writeHead(statusCode);
@@ -875,6 +1264,44 @@ Created: ${new Date().toISOString()}
     } catch (error) {
       console.error(`❌ Failed to initialize todos storage: ${error.message}`);
       this.todosStorePath = null;
+    }
+  }
+
+  private initializeConnectorsStorage(): void {
+    const connectorsStorePath = process.env.CONNECTORS_STORE_PATH;
+    const uploadedFilesPath = process.env.UPLOADED_FILES_PATH;
+
+    if (!connectorsStorePath) {
+      console.log('⚠️  CONNECTORS_STORE_PATH not configured, connectors disabled');
+      return;
+    }
+
+    try {
+      // Create connectors directory if it doesn't exist
+      const connectorsDir = resolve(connectorsStorePath).replace(/[^/]+$/, '');
+      if (!existsSync(connectorsDir)) {
+        mkdirSync(connectorsDir, { recursive: true });
+      }
+
+      this.connectorsStorePath = connectorsStorePath;
+      console.log(`✅ Connectors enabled, storing in: ${connectorsStorePath}`);
+
+      // Initialize uploaded files directory if configured
+      if (uploadedFilesPath) {
+        if (!existsSync(uploadedFilesPath)) {
+          mkdirSync(uploadedFilesPath, { recursive: true });
+          console.log(`📁 Created uploaded files directory: ${uploadedFilesPath}`);
+        }
+        this.uploadedFilesPath = uploadedFilesPath;
+        console.log(`✅ File uploads enabled, storing in: ${uploadedFilesPath}`);
+      } else {
+        console.log('⚠️  UPLOADED_FILES_PATH not configured, file uploads disabled');
+      }
+
+    } catch (error) {
+      console.error(`❌ Failed to initialize connectors storage: ${error.message}`);
+      this.connectorsStorePath = null;
+      this.uploadedFilesPath = null;
     }
   }
 
@@ -1131,6 +1558,157 @@ Created: ${new Date().toISOString()}
 
     } catch (error) {
       console.error(`❌ Error reading artifacts index file: ${error.message}`);
+      return null;
+    }
+  }
+
+  private loadConnectors(): DataConnector[] {
+    if (!this.connectorsStorePath) {
+      return [];
+    }
+
+    try {
+      if (!existsSync(this.connectorsStorePath)) {
+        return [];
+      }
+
+      const content = readFileSync(this.connectorsStorePath, 'utf-8');
+      const lines = content.trim().split('\n').filter(line => line.length > 0);
+
+      const connectors: DataConnector[] = [];
+      for (const line of lines) {
+        try {
+          const connector: DataConnector = JSON.parse(line);
+          connectors.push(connector);
+        } catch (parseError) {
+          console.error(`Error parsing connector line: ${parseError.message}`);
+        }
+      }
+
+      return connectors;
+    } catch (error) {
+      console.error(`Error loading connectors: ${error.message}`);
+      return [];
+    }
+  }
+
+  private saveConnector(connector: DataConnector): void {
+    if (!this.connectorsStorePath) {
+      throw new Error('Connectors storage not configured');
+    }
+
+    try {
+      const connectorLine = JSON.stringify(connector) + '\n';
+      appendFileSync(this.connectorsStorePath, connectorLine);
+    } catch (error) {
+      throw new Error(`Failed to save connector: ${error.message}`);
+    }
+  }
+
+  private deleteConnectorFromStorage(connectorId: string): boolean {
+    if (!this.connectorsStorePath) {
+      return false;
+    }
+
+    try {
+      const connectors = this.loadConnectors();
+      const filteredConnectors = connectors.filter(c => c.id !== connectorId);
+      
+      if (filteredConnectors.length === connectors.length) {
+        return false; // Connector not found
+      }
+
+      // Rewrite the file with remaining connectors
+      const content = filteredConnectors.map(c => JSON.stringify(c)).join('\n') + (filteredConnectors.length > 0 ? '\n' : '');
+      writeFileSync(this.connectorsStorePath, content);
+      return true;
+    } catch (error) {
+      console.error(`Error deleting connector: ${error.message}`);
+      return false;
+    }
+  }
+
+  private updateConnectorLastUsed(connectorId: string): void {
+    if (!this.connectorsStorePath) {
+      return;
+    }
+
+    try {
+      const connectors = this.loadConnectors();
+      const connector = connectors.find(c => c.id === connectorId);
+      
+      if (connector) {
+        connector.last_used = new Date().toISOString();
+        
+        // Rewrite the file with updated connector
+        const content = connectors.map(c => JSON.stringify(c)).join('\n') + '\n';
+        writeFileSync(this.connectorsStorePath, content);
+      }
+    } catch (error) {
+      console.error(`Error updating connector last used: ${error.message}`);
+    }
+  }
+
+  private updateConnectorInStorage(connectorId: string, updates: Partial<DataConnector>): boolean {
+    if (!this.connectorsStorePath) {
+      return false;
+    }
+
+    try {
+      const connectors = this.loadConnectors();
+      const connectorIndex = connectors.findIndex(c => c.id === connectorId);
+      
+      if (connectorIndex === -1) {
+        return false; // Connector not found
+      }
+
+      // Apply updates
+      connectors[connectorIndex] = { ...connectors[connectorIndex], ...updates };
+        
+      // Rewrite the file with updated connector
+      const content = connectors.map(c => JSON.stringify(c)).join('\n') + '\n';
+      writeFileSync(this.connectorsStorePath, content);
+      return true;
+    } catch (error) {
+      console.error(`Error updating connector: ${error.message}`);
+      return false;
+    }
+  }
+
+  private generateConnectorId(): string {
+    return 'conn_' + randomUUID().replace(/-/g, '').substring(0, 12);
+  }
+
+  private detectFileType(filePath: string, mimeType?: string): string {
+    const ext = extname(filePath).toLowerCase();
+    
+    if (ext === '.csv') return 'csv';
+    if (ext === '.json') return 'json';
+    if (ext === '.txt' || ext === '.md' || ext === '.log') return 'text';
+    if (mimeType && mimeType.startsWith('text/')) return 'text';
+    
+    return 'binary';
+  }
+
+  private getFileMetadata(filePath: string): { file_size: number; mime_type: string; last_modified: string } | null {
+    try {
+      const stats = statSync(filePath);
+      const ext = extname(filePath).toLowerCase();
+      
+      let mimeType = 'application/octet-stream';
+      if (ext === '.txt') mimeType = 'text/plain';
+      else if (ext === '.csv') mimeType = 'text/csv';
+      else if (ext === '.json') mimeType = 'application/json';
+      else if (ext === '.md') mimeType = 'text/markdown';
+      else if (ext === '.log') mimeType = 'text/plain';
+      
+      return {
+        file_size: stats.size,
+        mime_type: mimeType,
+        last_modified: stats.mtime.toISOString()
+      };
+    } catch (error) {
+      console.error(`Error getting file metadata: ${error.message}`);
       return null;
     }
   }
