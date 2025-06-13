@@ -44,12 +44,12 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
    export PROVIDER="google"
    export MODEL="gemini-1.5-pro"
 
-   export WORKING_DIRECTORY="/path/to/your/project"  # Optional
+   export WORKING_DIRECTORY="/path/to/your/project"
    ```
 
    **Option B: Using a .env file (recommended)**
    ```bash
-   cp ws-server.env.example .env
+   cp .env.example .env
    # Edit .env with your configuration
    ```
 
@@ -66,6 +66,12 @@ This WebSocket server provides web-based access to the Codex CLI's `AgentLoop` f
 3. Install WebSocket dependencies:
    ```bash
    npm install ws @types/ws
+   ```
+
+4. Install `gcsfuse` following the [official instructions](https://cloud.google.com/storage/docs/cloud-storage-fuse/install).
+5. Login to GCloud 1x/day:
+   ```bash
+   gcloud auth application-default login
    ```
 
 ### Running the Server
