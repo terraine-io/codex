@@ -1532,12 +1532,8 @@ Created: ${new Date().toISOString()}
   }
 
   private loadArtifactsIndex(): ArtifactsIndex | null {
-    const artifactsIndexPath = process.env.ARTIFACTS_INDEX_PATH;
-
-    if (!artifactsIndexPath) {
-      console.log('⚠️  ARTIFACTS_INDEX_PATH not configured, returning empty artifacts list');
-      return null;
-    }
+    const workingDir = process.env.WORKING_DIRECTORY;
+    const artifactsIndexPath = join(workingDir, '.terraine', 'artifact_catalog.json');
 
     if (!existsSync(artifactsIndexPath)) {
       console.error(`❌ Artifacts index file not found: ${artifactsIndexPath}`);
