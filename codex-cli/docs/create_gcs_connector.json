@@ -1,0 +1,8 @@
+{
+  "name": "Wafer run logs",
+  "type": "gcs",
+  "config": {
+    "gcs_url": "gs://tio-testdata-infra-test-453518/wp/MPIWP_2025-03-06T105529.347233/log"
+  }
+}
+

@@ -709,6 +709,57 @@ curl -X POST http://localhost:8080/sessions/def456:switch
 # Agent context has switched to the new session
 ```
 
+### REST API for Data Connectors
+
+The server provides REST endpoints for managing data connectors that allow agents to access various data sources including local files and Google Cloud Storage buckets.
+
+**GET /connectors** - List all connectors
+```bash
+curl http://localhost:8080/connectors
+```
+
+**POST /connectors** - Create a new connector
+
+*Local file connector:*
+```bash
+curl -X POST http://localhost:8080/connectors \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Customer Data", "type": "local_file", "filename": "customers.csv"}'
+```
+
+*GCS connector (requires gcsfuse):*
+```bash
+curl -X POST http://localhost:8080/connectors \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Analytics Bucket", "type": "gcs", "config": {"gcs_url": "gs://my-bucket/data"}}'
+```
+
+**GET /connectors/{id}** - Get connector details
+```bash
+curl http://localhost:8080/connectors/conn_abc123
+```
+
+**POST /connectors/{id}:upload** - Upload content to local file connector
+```bash
+curl -X POST http://localhost:8080/connectors/conn_abc123:upload \
+  -H "Content-Type: text/plain" \
+  --data-binary @data.csv
+```
+
+**GET /connectors/{id}/content** - Get connector content with pagination
+```bash
+curl "http://localhost:8080/connectors/conn_abc123/content?offset=0&limit=100"
+```
+
+**DELETE /connectors/{id}** - Delete connector
+```bash
+curl -X DELETE http://localhost:8080/connectors/conn_abc123
+```
+
+**Note:** GCS connectors automatically mount the bucket to a local directory when created, allowing agents to access files using standard Unix commands. The mount point path is returned in the connector configuration.
+
+For detailed API documentation, see [CONNECTOR_API.md](CONNECTOR_API.md).
+
 ## apply_patch Command Documentation
 
 The `apply_patch` command is a core feature of the AgentLoop system that allows LLMs to modify files using a structured patch format. Understanding how it works is crucial for troubleshooting patch application errors.

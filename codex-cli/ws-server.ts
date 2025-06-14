@@ -15,6 +15,8 @@ import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
 import { resolve } from 'path';
 import { initLogger, debug } from './src/utils/logger/log.js';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 
 // Load environment variables and configure working directory
 function initializeEnvironment() {
@@ -160,12 +162,17 @@ interface ArtifactsIndex {
 interface DataConnector {
   id: string;
   name: string;
-  type: 'local_file';
+  type: 'local_file' | 'gcs';
   config: {
+    // Local file config
     file_path?: string; // Optional until file is uploaded
     filename?: string; // Filename to use when saving uploaded content
     file_type?: 'text' | 'csv' | 'json' | 'binary';
     encoding?: string;
+    
+    // GCS config
+    gcs_url?: string; // GCS URL in format gs://bucket-name or gs://bucket-name/path/to/subroot
+    local_mount_point_path?: string; // Local mount point where GCS bucket is mounted
   };
   status: 'pending_upload' | 'active' | 'inactive' | 'error';
   created_at: string;
@@ -190,6 +197,95 @@ interface SessionInfo {
   start_time: string;
   last_update_time: string;
   event_count: number;
+}
+
+// GCS utility functions
+const execAsync = promisify(exec);
+
+interface GCSConfig {
+  bucketId: string;
+  restrictToSubroot?: string;
+}
+
+function parseGcsUrl(gcsUrl: string): GCSConfig | null {
+  if (!gcsUrl.startsWith('gs://')) {
+    return null;
+  }
+  
+  const urlPart = gcsUrl.slice(5); // Remove 'gs://' prefix
+  const parts = urlPart.split('/');
+  
+  if (parts.length === 0 || !parts[0]) {
+    return null;
+  }
+  
+  const bucketId = parts[0];
+  const restrictToSubroot = parts.length > 1 ? parts.slice(1).join('/') : undefined;
+  
+  return {
+    bucketId,
+    restrictToSubroot
+  };
+}
+
+async function checkGcsfuseInstalled(): Promise<boolean> {
+  try {
+    await execAsync('gcsfuse -v');
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function mountGcsBucket(config: GCSConfig, mountPoint: string): Promise<void> {
+  const { bucketId, restrictToSubroot } = config;
+  
+  // Create mount point directory if it doesn't exist
+  if (!existsSync(mountPoint)) {
+    mkdirSync(mountPoint, { recursive: true });
+  }
+  
+  let command: string;
+  if (restrictToSubroot) {
+    command = `gcsfuse --only-dir=${restrictToSubroot} --implicit-dirs ${bucketId} ${mountPoint}`;
+  } else {
+    command = `gcsfuse --implicit-dirs ${bucketId} ${mountPoint}`;
+  }
+  
+  await execAsync(command);
+}
+
+async function unmountGcsBucket(mountPoint: string): Promise<void> {
+  try {
+    await execAsync(`fusermount -u ${mountPoint}`);
+  } catch (error) {
+    // Ignore errors if mount point is not mounted
+    console.warn(`Failed to unmount ${mountPoint}:`, error);
+  }
+}
+
+async function getActiveMounts(gcsMountRoot: string): Promise<string[]> {
+  try {
+    const { stdout } = await execAsync('mount');
+    const mountLines = stdout.split('\n');
+    const gcsMounts: string[] = [];
+    
+    for (const line of mountLines) {
+      if (line.includes('gcsfuse') && line.includes(gcsMountRoot)) {
+        // Extract mount point from mount line
+        const parts = line.split(' on ');
+        if (parts.length >= 2) {
+          const mountPoint = parts[1].split(' ')[0];
+          gcsMounts.push(mountPoint);
+        }
+      }
+    }
+    
+    return gcsMounts;
+  } catch (error) {
+    console.warn('Failed to get active mounts:', error);
+    return [];
+  }
 }
 
 class WebSocketAgentServer {
@@ -229,8 +325,8 @@ class WebSocketAgentServer {
     // Initialize todos storage
     this.initializeTodosStorage();
     
-    // Initialize connectors storage
-    this.initializeConnectorsStorage();
+    // Initialize connectors storage (including GCS)
+    this.initializeConnectorsStorageAsync();
 
     // Create HTTP server first
     this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
@@ -906,40 +1002,111 @@ Created: ${new Date().toISOString()}
       body += chunk.toString();
     });
 
-    req.on('end', () => {
+    req.on('end', async () => {
       try {
         const requestData = JSON.parse(body);
         
         // Validate required fields
-        if (!requestData.name) {
-          this.sendHttpError(res, 400, 'Missing required field: name');
+        if (!requestData.name || !requestData.type) {
+          this.sendHttpError(res, 400, 'Missing required fields: name, type');
           return;
         }
 
-        // Always create connector in pending_upload state - files must be uploaded separately
-        const connector: DataConnector = {
-          id: this.generateConnectorId(),
-          name: requestData.name,
-          type: 'local_file',
-          config: {
-            filename: requestData.filename,
-            file_type: requestData.file_type,
-            encoding: requestData.encoding || 'utf-8'
-          },
-          status: 'pending_upload',
-          created_at: new Date().toISOString()
-        };
-
-        // Save connector
-        this.saveConnector(connector);
-        
-        console.log(`✅ Created connector: ${connector.id} (${connector.name}) - Status: ${connector.status}`);
-        this.sendJsonResponse(res, 201, connector);
+        if (requestData.type === 'local_file') {
+          await this.createLocalFileConnector(requestData, res);
+        } else if (requestData.type === 'gcs') {
+          await this.createGcsConnector(requestData, res);
+        } else {
+          this.sendHttpError(res, 400, 'Invalid connector type. Supported types: local_file, gcs');
+        }
 
       } catch (parseError) {
         this.sendHttpError(res, 400, 'Invalid JSON in request body');
       }
     });
+  }
+
+  private async createLocalFileConnector(requestData: any, res: ServerResponse): Promise<void> {
+    // Create local file connector in pending_upload state - files must be uploaded separately
+    const connector: DataConnector = {
+      id: this.generateConnectorId(),
+      name: requestData.name,
+      type: 'local_file',
+      config: {
+        filename: requestData.filename,
+        file_type: requestData.file_type,
+        encoding: requestData.encoding || 'utf-8'
+      },
+      status: 'pending_upload',
+      created_at: new Date().toISOString()
+    };
+
+    // Save connector
+    this.saveConnector(connector);
+    
+    console.log(`✅ Created local file connector: ${connector.id} (${connector.name}) - Status: ${connector.status}`);
+    this.sendJsonResponse(res, 201, connector);
+  }
+
+  private async createGcsConnector(requestData: any, res: ServerResponse): Promise<void> {
+    try {
+      // Validate GCS URL - check both top-level and config.gcs_url for backwards compatibility
+      const gcsUrl = requestData.config?.gcs_url || requestData.gcs_url;
+      if (!gcsUrl) {
+        this.sendHttpError(res, 400, 'Missing required field for GCS connector: config.gcs_url');
+        return;
+      }
+
+      const gcsConfig = parseGcsUrl(gcsUrl);
+      if (!gcsConfig) {
+        this.sendHttpError(res, 400, 'Invalid GCS URL format. Expected: gs://bucket-name or gs://bucket-name/path/to/subroot');
+        return;
+      }
+
+      // Check if gcsfuse is available
+      const gcsfuseInstalled = await checkGcsfuseInstalled();
+      if (!gcsfuseInstalled) {
+        this.sendHttpError(res, 503, 'gcsfuse is not installed or not available in PATH');
+        return;
+      }
+
+      // Determine mount point
+      const gcsMountRoot = join(process.cwd(), '.terraine', 'gcs');
+      const { bucketId, restrictToSubroot } = gcsConfig;
+      let mountPoint: string;
+      
+      if (restrictToSubroot) {
+        mountPoint = join(gcsMountRoot, bucketId, restrictToSubroot);
+      } else {
+        mountPoint = join(gcsMountRoot, bucketId);
+      }
+
+      // Create the connector
+      const connector: DataConnector = {
+        id: this.generateConnectorId(),
+        name: requestData.name,
+        type: 'gcs',
+        config: {
+          gcs_url: gcsUrl,
+          local_mount_point_path: mountPoint
+        },
+        status: 'active', // GCS connectors are immediately active after mounting
+        created_at: new Date().toISOString()
+      };
+
+      // Mount the GCS bucket
+      await mountGcsBucket(gcsConfig, mountPoint);
+      
+      // Save connector
+      this.saveConnector(connector);
+      
+      console.log(`✅ Created and mounted GCS connector: ${connector.id} (${connector.name}) - Mount: ${mountPoint}`);
+      this.sendJsonResponse(res, 201, connector);
+
+    } catch (error) {
+      console.error(`Failed to create GCS connector: ${error.message}`);
+      this.sendHttpError(res, 500, `Failed to mount GCS bucket: ${error.message}`);
+    }
   }
 
   private handleGetConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
@@ -983,32 +1150,55 @@ Created: ${new Date().toISOString()}
   }
 
   private handleDeleteConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
-    try {
-      // Validate connector ID format
-      if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
-        this.sendHttpError(res, 400, 'Invalid connector ID format');
-        return;
-      }
-
-      if (!this.connectorsStorePath) {
-        this.sendHttpError(res, 503, 'Connectors storage not configured');
-        return;
-      }
-
-      const deleted = this.deleteConnectorFromStorage(connectorId);
-      
-      if (!deleted) {
-        this.sendHttpError(res, 404, 'Connector not found');
-        return;
-      }
-
-      console.log(`🗑️ Deleted connector: ${connectorId}`);
-      res.writeHead(204);
-      res.end();
-    } catch (error) {
+    // Use async wrapper since we need to unmount GCS connectors
+    this.handleDeleteConnectorAsync(connectorId, req, res).catch(error => {
       console.error(`Error handling DELETE /connectors/${connectorId} request:`, error);
       this.sendHttpError(res, 500, 'Internal server error while deleting connector');
+    });
+  }
+
+  private async handleDeleteConnectorAsync(connectorId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Validate connector ID format
+    if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
+      this.sendHttpError(res, 400, 'Invalid connector ID format');
+      return;
     }
+
+    if (!this.connectorsStorePath) {
+      this.sendHttpError(res, 503, 'Connectors storage not configured');
+      return;
+    }
+
+    // Get connector before deletion to handle GCS unmounting
+    const connectors = this.loadConnectors();
+    const connector = connectors.find(c => c.id === connectorId);
+    
+    if (!connector) {
+      this.sendHttpError(res, 404, 'Connector not found');
+      return;
+    }
+
+    // If it's a GCS connector, unmount before deleting
+    if (connector.type === 'gcs' && connector.config.local_mount_point_path) {
+      try {
+        console.log(`🔄 Unmounting GCS connector: ${connector.name} from ${connector.config.local_mount_point_path}`);
+        await unmountGcsBucket(connector.config.local_mount_point_path);
+      } catch (error) {
+        console.warn(`⚠️  Failed to unmount GCS connector ${connectorId}: ${error.message}`);
+        // Continue with deletion even if unmount fails
+      }
+    }
+
+    const deleted = this.deleteConnectorFromStorage(connectorId);
+    
+    if (!deleted) {
+      this.sendHttpError(res, 404, 'Connector not found');
+      return;
+    }
+
+    console.log(`🗑️ Deleted connector: ${connectorId}`);
+    res.writeHead(204);
+    res.end();
   }
 
   private handleGetConnectorContent(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
@@ -1129,6 +1319,12 @@ Created: ${new Date().toISOString()}
     
     if (!connector) {
       this.sendHttpError(res, 404, 'Connector not found');
+      return;
+    }
+
+    // GCS connectors don't support content uploads
+    if (connector.type === 'gcs') {
+      this.sendHttpError(res, 400, 'Content upload not supported for GCS connectors. Files are accessed directly via the mounted file system.');
       return;
     }
 
@@ -1267,7 +1463,7 @@ Created: ${new Date().toISOString()}
     }
   }
 
-  private initializeConnectorsStorage(): void {
+  private async initializeConnectorsStorageAsync(): Promise<void> {
     const workingDir = process.env.WORKING_DIRECTORY;
     const connectorsStorePath = join(workingDir, '.terraine', 'connectors.jsonl');
     const uploadedFilesPath = join(workingDir, '.terraine', 'uploads');
@@ -1299,10 +1495,80 @@ Created: ${new Date().toISOString()}
         console.log('⚠️  UPLOADED_FILES_PATH not configured, file uploads disabled');
       }
 
+      // Initialize GCS functionality
+      await this.initializeGcs();
+
     } catch (error) {
       console.error(`❌ Failed to initialize connectors storage: ${error.message}`);
       this.connectorsStorePath = null;
       this.uploadedFilesPath = null;
+    }
+  }
+
+  private async initializeGcs(): Promise<void> {
+    try {
+      // Check if gcsfuse is installed
+      const gcsfuseInstalled = await checkGcsfuseInstalled();
+      if (!gcsfuseInstalled) {
+        console.log('⚠️  gcsfuse not found in PATH, GCS connectors disabled');
+        return;
+      }
+
+      console.log('✅ gcsfuse found, GCS connectors enabled');
+
+      // Set up GCS mount root
+      const gcsMountRoot = join(process.cwd(), '.terraine', 'gcs');
+      if (!existsSync(gcsMountRoot)) {
+        mkdirSync(gcsMountRoot, { recursive: true });
+        console.log(`📁 Created GCS mount root: ${gcsMountRoot}`);
+      }
+
+      // Check for and unmount any existing mounts
+      const activeMounts = await getActiveMounts(gcsMountRoot);
+      for (const mountPoint of activeMounts) {
+        console.log(`🔄 Unmounting existing GCS mount: ${mountPoint}`);
+        await unmountGcsBucket(mountPoint);
+      }
+
+      // Synchronize existing GCS connectors from connectors.jsonl
+      await this.synchronizeGcsConnectors();
+
+    } catch (error) {
+      console.warn(`⚠️  GCS initialization failed: ${error.message}`);
+    }
+  }
+
+  private async synchronizeGcsConnectors(): Promise<void> {
+    if (!this.connectorsStorePath || !existsSync(this.connectorsStorePath)) {
+      return;
+    }
+
+    try {
+      const content = readFileSync(this.connectorsStorePath, 'utf-8');
+      const lines = content.trim().split('\n').filter(line => line.trim());
+
+      const gcsMountRoot = join(process.cwd(), '.terraine', 'gcs');
+
+      for (const line of lines) {
+        const connector = JSON.parse(line) as DataConnector;
+        
+        if (connector.type === 'gcs' && connector.status === 'active' && connector.config.gcs_url) {
+          const gcsConfig = parseGcsUrl(connector.config.gcs_url);
+          if (gcsConfig) {
+            const mountPoint = connector.config.local_mount_point_path;
+            if (mountPoint && existsSync(mountPoint)) {
+              // Check if already mounted
+              const activeMounts = await getActiveMounts(gcsMountRoot);
+              if (!activeMounts.includes(mountPoint)) {
+                console.log(`🔄 Re-mounting GCS connector: ${connector.name}`);
+                await mountGcsBucket(gcsConfig, mountPoint);
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`⚠️  Failed to synchronize GCS connectors: ${error.message}`);
     }
   }
 

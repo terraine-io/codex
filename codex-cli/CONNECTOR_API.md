@@ -2,7 +2,10 @@
 
 ## Overview
 
-The Connector API provides a REST interface for managing data connectors that allow users to upload and access file content through the WebSocket server. The API follows a two-step process: first create a connector, then upload content to it.
+The Connector API provides a REST interface for managing data connectors that allow agents to access various types of data sources. The API supports two types of connectors:
+
+- **Local File Connectors**: For uploading and storing files locally. Follows a two-step process: create connector, then upload content.
+- **Google Cloud Storage (GCS) Connectors**: For mounting Google Cloud Storage buckets as local file systems using `gcsfuse`.
 
 ## Base URL
 ```
@@ -40,6 +43,17 @@ GET /connectors
         "mime_type": "text/csv",
         "last_modified": "2024-12-06T10:30:00Z"
       }
+    },
+    {
+      "id": "conn_7b92c54fd801",
+      "name": "Analytics Bucket",
+      "type": "gcs",
+      "config": {
+        "gcs_url": "gs://my-analytics-bucket/data",
+        "local_mount_point_path": "/working-dir/.terraine/gcs/my-analytics-bucket/data"
+      },
+      "status": "active",
+      "created_at": "2024-12-06T12:00:00Z"
     }
   ]
 }
@@ -50,12 +64,15 @@ GET /connectors
 POST /connectors
 ```
 
-**Description:** Create a new connector for future file upload.
+**Description:** Create a new connector. The behavior depends on the connector type.
+
+#### 2a. Create Local File Connector
 
 **Request Body:**
 ```json
 {
   "name": "Customer Data",
+  "type": "local_file",
   "filename": "customers.csv",
   "file_type": "csv",
   "encoding": "utf-8"
@@ -64,6 +81,7 @@ POST /connectors
 
 **Request Fields:**
 - `name` (required): Display name for the connector
+- `type` (required): Must be `"local_file"`
 - `filename` (optional): Desired filename for uploaded content
 - `file_type` (optional): Type of file (`csv`, `json`, `text`, `binary`)
 - `encoding` (optional): Text encoding (defaults to `utf-8`)
@@ -83,6 +101,43 @@ POST /connectors
   "created_at": "2024-12-06T10:30:00Z"
 }
 ```
+
+#### 2b. Create GCS Connector
+
+**Request Body:**
+```json
+{
+  "name": "Analytics Bucket",
+  "type": "gcs",
+  "config": {
+    "gcs_url": "gs://my-analytics-bucket/data"
+  }
+}
+```
+
+**Request Fields:**
+- `name` (required): Display name for the connector
+- `type` (required): Must be `"gcs"`
+- `config.gcs_url` (required): GCS URL in format:
+  - `gs://bucket-name` - Mount entire bucket
+  - `gs://bucket-name/path/to/subroot` - Mount only specific subdirectory
+
+**Response (201):**
+```json
+{
+  "id": "conn_7b92c54fd801",
+  "name": "Analytics Bucket",
+  "type": "gcs",
+  "config": {
+    "gcs_url": "gs://my-analytics-bucket/data",
+    "local_mount_point_path": "/working-dir/.terraine/gcs/my-analytics-bucket/data"
+  },
+  "status": "active",
+  "created_at": "2024-12-06T12:00:00Z"
+}
+```
+
+**Note:** GCS connectors are immediately active after creation and mounting. No upload step is required.
 
 ### 3. Get Connector Details
 ```http
@@ -121,7 +176,9 @@ GET /connectors/{id}
 POST /connectors/{id}:upload
 ```
 
-**Description:** Upload file content to an existing connector. The connector status will change from `pending_upload` to `active` upon successful upload.
+**Description:** Upload file content to an existing **local file** connector. The connector status will change from `pending_upload` to `active` upon successful upload.
+
+**Note:** This endpoint is only available for `local_file` connectors. GCS connectors do not support content uploads as files are accessed directly through the mounted file system.
 
 **Path Parameters:**
 - `id`: Connector ID
@@ -160,6 +217,13 @@ Bob,35,Los Angeles,USA
     "mime_type": "text/csv",
     "last_modified": "2024-12-06T10:30:00Z"
   }
+}
+```
+
+**Error Response (400) - GCS Connector:**
+```json
+{
+  "error": "Content upload not supported for GCS connectors. Files are accessed directly via the mounted file system."
 }
 ```
 
@@ -317,13 +381,36 @@ const contentResponse = await fetch(
 const { content, chunk_info } = await contentResponse.json();
 ```
 
+#### GCS Connector Example
+```javascript
+// Create GCS connector (immediately active)
+const response = await fetch('/connectors', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'Data Lake',
+    type: 'gcs',
+    config: {
+      gcs_url: 'gs://my-data-lake/analytics'
+    }
+  })
+});
+const connector = await response.json();
+// connector.status is already 'active' - no upload needed
+
+// Access files directly via local mount point
+console.log('Mount point:', connector.config.local_mount_point_path);
+// Agent can now use ls, cat, etc. on the mount point
+```
+
 ### cURL Examples
 
+#### Local File Connector
 ```bash
-# Create connector
+# Create local file connector
 curl -X POST http://localhost:8080/connectors \
   -H "Content-Type: application/json" \
-  -d '{"name": "Test Data", "filename": "test.csv", "file_type": "csv"}'
+  -d '{"name": "Test Data", "type": "local_file", "filename": "test.csv", "file_type": "csv"}'
 
 # Upload content
 curl -X POST "http://localhost:8080/connectors/conn_123:upload" \
@@ -334,10 +421,36 @@ curl -X POST "http://localhost:8080/connectors/conn_123:upload" \
 curl "http://localhost:8080/connectors/conn_123/content?offset=10&limit=20"
 ```
 
+#### GCS Connector
+```bash
+# Create GCS connector (automatically mounts)
+curl -X POST http://localhost:8080/connectors \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Analytics Bucket", "type": "gcs", "config": {"gcs_url": "gs://my-bucket/data"}}'
+
+# List connectors to see mount point
+curl http://localhost:8080/connectors
+
+# Delete connector (automatically unmounts)
+curl -X DELETE http://localhost:8080/connectors/conn_456
+```
+
 ## Integration Notes
 
+### Local File Connectors
 1. **Two-Step Process**: Always create the connector first, then upload content
 2. **Status Checking**: Verify connector status is `active` before accessing content
 3. **Chunking**: Use offset/limit parameters for large files to avoid memory issues
-4. **Error Handling**: Check HTTP status codes and error messages for proper error handling
-5. **File Management**: Uploaded files are automatically managed server-side with unique names
+4. **File Management**: Uploaded files are automatically managed server-side with unique names
+
+### GCS Connectors
+1. **Prerequisites**: Requires `gcsfuse` to be installed and Google Cloud authentication configured
+2. **Immediate Activation**: GCS connectors are immediately `active` after creation (no upload step)
+3. **File System Access**: Agent can use standard Unix commands (`ls`, `cat`, `find`, etc.) on the mount point
+4. **Automatic Cleanup**: Deleting a GCS connector automatically unmounts the file system
+5. **Path Structure**: Mount points follow the pattern: `{working-dir}/.terraine/gcs/{bucket-id}/{subroot}`
+
+### General Notes
+1. **Error Handling**: Check HTTP status codes and error messages for proper error handling
+2. **Concurrent Access**: Multiple connectors can be active simultaneously
+3. **Authentication**: GCS connectors inherit Google Cloud credentials from the server environment
