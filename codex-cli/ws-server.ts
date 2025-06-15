@@ -1503,7 +1503,7 @@ class WebSocketAgentServer {
       const seedInput = this.contextManager.getCompactedSeedInput();
 
       // Recreate AgentLoop with compacted context
-      this.initializeAgentLoop(seedInput);
+      this.initializeAgentLoop(undefined, seedInput);
 
       const newTokenCount = this.contextManager.getTokenCount();
       const reductionPercent = ((oldTokenCount - newTokenCount) / oldTokenCount) * 100;
