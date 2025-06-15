@@ -760,6 +760,73 @@ curl -X DELETE http://localhost:8080/connectors/conn_abc123
 
 For detailed API documentation, see [CONNECTOR_API.md](CONNECTOR_API.md).
 
+### REST API for Artifacts
+
+The server provides REST endpoints for accessing artifacts from the project's artifact catalog.
+
+**GET /artifacts** - List all artifacts
+```bash
+curl http://localhost:8080/artifacts
+```
+
+Response:
+```json
+{
+  "artifacts": [
+    {
+      "artifact_id": "artifact_123",
+      "file_path": "/path/to/artifact/file.txt",
+      "overview_md": "Description of the artifact",
+      "relative_file_path": "file.txt"
+    }
+  ],
+  "artifacts_root_path": "/path/to/artifacts/root"
+}
+```
+
+**GET /artifacts/{artifact_id}** - Get specific artifact with content
+```bash
+curl http://localhost:8080/artifacts/artifact_123
+```
+
+Response:
+```json
+{
+  "artifact_id": "artifact_123",
+  "file_path": "/path/to/artifact/file.txt",
+  "overview_md": "Description of the artifact",
+  "relative_file_path": "file.txt",
+  "content": "Full file content as string...",
+  "metadata": {
+    "file_size": 1024,
+    "mime_type": "text/plain",
+    "last_modified": "2025-01-09T12:34:56.789Z"
+  }
+}
+```
+
+**Artifact Catalog Structure:**
+
+Artifacts are loaded from `.terraine/artifact_catalog.json` in the working directory. The catalog file should have this structure:
+
+```json
+{
+  "artifacts_root_path": "/path/to/artifacts/root",
+  "artifacts": [
+    {
+      "artifact_id": "unique_identifier",
+      "file_path": "/absolute/path/to/artifact/file",
+      "overview": "Description of what this artifact contains"
+    }
+  ]
+}
+```
+
+**Error Responses:**
+- `503 Service Unavailable` - Artifacts index not configured or available
+- `404 Not Found` - Artifact not found with the given ID, or file not found on disk
+- `500 Internal Server Error` - Failed to read artifact content
+
 ## apply_patch Command Documentation
 
 The `apply_patch` command is a core feature of the AgentLoop system that allows LLMs to modify files using a structured patch format. Understanding how it works is crucial for troubleshooting patch application errors.

@@ -4,7 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
 import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync, renameSync, readlinkSync, createWriteStream } from 'fs';
-import { basename, join, resolve, extname } from 'path';
+import { basename, join, resolve as resolvePath, extname } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
@@ -17,6 +17,7 @@ import { resolve } from 'path';
 import { initLogger, debug } from './src/utils/logger/log.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { RestHandlers } from './ws-rest-handlers.js';
 
 // Load environment variables and configure working directory
 function initializeEnvironment() {
@@ -148,18 +149,19 @@ interface ContextCompactedMessage extends WSMessage {
 }
 
 // Types for artifacts
-interface ArtifactItem {
+export interface ArtifactItem {
+  artifact_id: string;
   file_path: string;
   overview: string;
 }
 
-interface ArtifactsIndex {
+export interface ArtifactsIndex {
   artifacts_root_path: string;
   artifacts: ArtifactItem[];
 }
 
 // Types for data connectors
-interface DataConnector {
+export interface DataConnector {
   id: string;
   name: string;
   type: 'local_file' | 'gcs';
@@ -185,14 +187,14 @@ interface DataConnector {
 }
 
 // Types for session management
-interface SessionEvent {
+export interface SessionEvent {
   timestamp: string;
   event_type: 'websocket_message_received' | 'websocket_message_sent';
   direction: 'incoming' | 'outgoing';
   message_data: any;
 }
 
-interface SessionInfo {
+export interface SessionInfo {
   id: string;
   start_time: string;
   last_update_time: string;
@@ -207,7 +209,7 @@ interface GCSConfig {
   restrictToSubroot?: string;
 }
 
-function parseGcsUrl(gcsUrl: string): GCSConfig | null {
+export function parseGcsUrl(gcsUrl: string): GCSConfig | null {
   if (!gcsUrl.startsWith('gs://')) {
     return null;
   }
@@ -228,7 +230,7 @@ function parseGcsUrl(gcsUrl: string): GCSConfig | null {
   };
 }
 
-async function checkGcsfuseInstalled(): Promise<boolean> {
+export async function checkGcsfuseInstalled(): Promise<boolean> {
   try {
     await execAsync('gcsfuse -v');
     return true;
@@ -237,7 +239,7 @@ async function checkGcsfuseInstalled(): Promise<boolean> {
   }
 }
 
-async function mountGcsBucket(config: GCSConfig, mountPoint: string): Promise<void> {
+export async function mountGcsBucket(config: GCSConfig, mountPoint: string): Promise<void> {
   const { bucketId, restrictToSubroot } = config;
   
   // Create mount point directory if it doesn't exist
@@ -255,7 +257,7 @@ async function mountGcsBucket(config: GCSConfig, mountPoint: string): Promise<vo
   await execAsync(command);
 }
 
-async function unmountGcsBucket(mountPoint: string): Promise<void> {
+export async function unmountGcsBucket(mountPoint: string): Promise<void> {
   try {
     await execAsync(`fusermount -u ${mountPoint}`);
   } catch (error) {
@@ -307,6 +309,7 @@ class WebSocketAgentServer {
   private connectorsStorePath: string | null = null;
   private uploadedFilesPath: string | null = null;
   private messageFragments: Map<string, ResponseItem[]> = new Map();
+  private restHandlers: RestHandlers;
 
   // Fragment collection for turn-based message logging:
   // Collects streaming message fragments during a conversation turn and combines
@@ -468,40 +471,43 @@ class WebSocketAgentServer {
     console.log(`📡 HTTP ${method} ${pathname}`);
 
     if (method === 'GET' && pathname === '/sessions') {
-      this.handleListSessions(req, res);
+      this.restHandlers.handleListSessions(req, res);
     } else if (method === 'POST' && pathname === '/sessions') {
-      this.handleCreateSession(req, res);
+      this.restHandlers.handleCreateSession(req, res);
     } else if (method === 'GET' && pathname.startsWith('/sessions/')) {
       const sessionId = pathname.substring('/sessions/'.length);
-      this.handleGetSession(sessionId, req, res);
+      this.restHandlers.handleGetSession(sessionId, req, res);
     } else if (method === 'DELETE' && pathname.startsWith('/sessions/')) {
       const sessionId = pathname.substring('/sessions/'.length);
-      this.handleDeleteSession(sessionId, req, res);
+      this.restHandlers.handleDeleteSession(sessionId, req, res);
     } else if (method === 'POST' && pathname.includes(':switch')) {
       // Handle POST /sessions/{session_id}:switch
       const match = pathname.match(/^\/sessions\/([^:]+):switch$/);
       if (match) {
         const sessionId = match[1];
-        this.handleSwitchSession(sessionId, req, res);
+        this.restHandlers.handleSwitchSession(sessionId, req, res);
       } else {
         this.sendHttpError(res, 400, 'Invalid switch session path format');
       }
     } else if (method === 'GET' && pathname === '/artifacts') {
-      this.handleGetArtifacts(req, res);
+      this.restHandlers.handleGetArtifacts(req, res);
+    } else if (method === 'GET' && pathname.startsWith('/artifacts/')) {
+      const artifactId = pathname.substring('/artifacts/'.length);
+      this.restHandlers.handleGetArtifact(artifactId, req, res);
     } else if (method === 'GET' && pathname === '/connectors') {
-      this.handleListConnectors(req, res);
+      this.restHandlers.handleListConnectors(req, res);
     } else if (method === 'POST' && pathname === '/connectors') {
-      this.handleCreateConnector(req, res);
+      this.restHandlers.handleCreateConnector(req, res);
     } else if (method === 'GET' && pathname.startsWith('/connectors/')) {
       const pathParts = pathname.split('/');
       if (pathParts.length === 3) {
         // GET /connectors/{id}
         const connectorId = pathParts[2];
-        this.handleGetConnector(connectorId, req, res);
+        this.restHandlers.handleGetConnector(connectorId, req, res);
       } else if (pathParts.length === 4 && pathParts[3] === 'content') {
         // GET /connectors/{id}/content
         const connectorId = pathParts[2];
-        this.handleGetConnectorContent(connectorId, req, res);
+        this.restHandlers.handleGetConnectorContent(connectorId, req, res);
       } else {
         this.sendHttpError(res, 404, 'Not Found');
       }
@@ -509,7 +515,7 @@ class WebSocketAgentServer {
       const pathParts = pathname.split('/');
       if (pathParts.length === 3) {
         const connectorId = pathParts[2];
-        this.handleDeleteConnector(connectorId, req, res);
+        this.restHandlers.handleDeleteConnector(connectorId, req, res);
       } else {
         this.sendHttpError(res, 404, 'Not Found');
       }
@@ -518,7 +524,7 @@ class WebSocketAgentServer {
       const match = pathname.match(/^\/connectors\/([^:]+):upload$/);
       if (match) {
         const connectorId = match[1];
-        this.handleUploadToConnector(connectorId, req, res);
+        this.restHandlers.handleUploadToConnector(connectorId, req, res);
       } else {
         this.sendHttpError(res, 400, 'Invalid upload path format');
       }
@@ -526,884 +532,6 @@ class WebSocketAgentServer {
       this.sendHttpError(res, 404, 'Not Found');
     }
   }
-
-  private handleListSessions(req: IncomingMessage, res: ServerResponse): void {
-    try {
-      const sessions = this.loadSessionsList();
-      this.sendJsonResponse(res, 200, { sessions });
-    } catch (error) {
-      console.error('Error handling /sessions request:', error);
-      this.sendHttpError(res, 500, 'Internal server error while loading sessions');
-    }
-  }
-
-  private handleGetSession(sessionId: string, req: IncomingMessage, res: ServerResponse): void {
-    try {
-      // Validate session ID format (should be alphanumeric)
-      if (!/^[a-zA-Z0-9]+$/.test(sessionId)) {
-        this.sendHttpError(res, 400, 'Invalid session ID format');
-        return;
-      }
-
-      const sessionData = this.loadSessionData(sessionId);
-      if (!sessionData) {
-        this.sendHttpError(res, 404, 'Session not found');
-        return;
-      }
-
-      this.sendJsonResponse(res, 200, sessionData);
-    } catch (error) {
-      console.error(`Error handling /sessions/${sessionId} request:`, error);
-      this.sendHttpError(res, 500, 'Internal server error while loading session');
-    }
-  }
-
-  private loadSessionsList(): SessionInfo[] {
-    if (!this.sessionStorePath) {
-      return []; // No session storage configured
-    }
-
-    try {
-      if (!existsSync(this.sessionStorePath)) {
-        return [];
-      }
-
-      const files = readdirSync(this.sessionStorePath);
-      const sessionFiles = files.filter(file => file.endsWith('.jsonl')).filter(file => !file.startsWith("."));
-
-      const sessions: SessionInfo[] = [];
-
-      for (const file of sessionFiles) {
-        try {
-          const sessionId = file.replace('.jsonl', '');
-          const filePath = join(this.sessionStorePath, file);
-          const stats = statSync(filePath);
-
-          // Read first and last lines to get start time and event count
-          const content = readFileSync(filePath, 'utf-8');
-          const lines = content.trim().split('\n').filter(line => line.length > 0);
-
-          if (lines.length === 0) {
-            continue; // Skip empty files
-          }
-
-          const firstEvent: SessionEvent = JSON.parse(lines[0]);
-          const lastEvent: SessionEvent = JSON.parse(lines[lines.length - 1]);
-
-          const sessionInfo: SessionInfo = {
-            id: sessionId,
-            start_time: firstEvent.timestamp,
-            last_update_time: lastEvent.timestamp,
-            event_count: lines.length
-          };
-
-          sessions.push(sessionInfo);
-        } catch (error) {
-          console.error(`Error processing session file ${file}:`, error.message);
-          // Continue with other files
-        }
-      }
-
-      // Sort by start time (newest first)
-      sessions.sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime());
-
-      return sessions;
-
-    } catch (error) {
-      console.error('Error loading sessions list:', error);
-      return [];
-    }
-  }
-
-  private loadSessionData(sessionId: string): { id: string; events: SessionEvent[] } | null {
-    if (!this.sessionStorePath) {
-      return null; // No session storage configured
-    }
-
-    try {
-      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
-      
-      if (!existsSync(sessionFile)) {
-        return null; // Session file not found
-      }
-
-      // Read the entire session file
-      const content = readFileSync(sessionFile, 'utf-8');
-      const lines = content.trim().split('\n').filter(line => line.length > 0);
-
-      if (lines.length === 0) {
-        return { id: sessionId, events: [] };
-      }
-
-      // Parse all events
-      const events: SessionEvent[] = [];
-      for (const line of lines) {
-        try {
-          const event: SessionEvent = JSON.parse(line);
-          events.push(event);
-        } catch (parseError) {
-          console.error(`Error parsing event in session ${sessionId}:`, parseError);
-          // Continue with other events instead of failing completely
-        }
-      }
-
-      return {
-        id: sessionId,
-        events
-      };
-
-    } catch (error) {
-      console.error(`Error loading session data for ${sessionId}:`, error);
-      return null;
-    }
-  }
-
-  private handleCreateSession(req: IncomingMessage, res: ServerResponse): void {
-    try {
-      if (!this.sessionStorePath) {
-        this.sendHttpError(res, 503, 'Session storage not configured');
-        return;
-      }
-
-      // Generate new session ID
-      const sessionId = this.generateSessionId();
-      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
-
-      // Create initial session event
-      const sessionEvent: SessionEvent = {
-        timestamp: new Date().toISOString(),
-        event_type: 'websocket_message_received',
-        direction: 'incoming',
-        message_data: { event: 'session_created_via_api' }
-      };
-
-      // Write initial event to session file
-      const eventLine = JSON.stringify(sessionEvent) + '\n';
-      appendFileSync(sessionFile, eventLine);
-
-      console.log(`✅ Created new session via API: ${sessionId}`);
-
-      // Return session info
-      const sessionInfo: SessionInfo = {
-        id: sessionId,
-        start_time: sessionEvent.timestamp,
-        last_update_time: sessionEvent.timestamp,
-        event_count: 1
-      };
-
-      this.sendJsonResponse(res, 201, sessionInfo);
-
-    } catch (error) {
-      console.error('Error creating session:', error);
-      this.sendHttpError(res, 500, 'Internal server error while creating session');
-    }
-  }
-
-  private handleDeleteSession(sessionId: string, req: IncomingMessage, res: ServerResponse): void {
-    try {
-      // Validate session ID format
-      if (!/^[a-zA-Z0-9]+$/.test(sessionId)) {
-        this.sendHttpError(res, 400, 'Invalid session ID format');
-        return;
-      }
-
-      if (!this.sessionStorePath) {
-        this.sendHttpError(res, 503, 'Session storage not configured');
-        return;
-      }
-
-      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
-
-      // Check if session exists
-      if (!existsSync(sessionFile)) {
-        this.sendHttpError(res, 404, 'Session not found');
-        return;
-      }
-
-      // Prevent deletion of active session
-      if (this.currentSessionId === sessionId) {
-        this.sendHttpError(res, 409, 'Cannot delete active session');
-        return;
-      }
-
-      // Generate timestamp for archive files
-      const timestamp = new Date().toISOString();
-
-      // Archive the session file instead of deleting it
-      const archivedSessionFile = join(this.sessionStorePath, `.${sessionId}-${timestamp}.jsonl`);
-      renameSync(sessionFile, archivedSessionFile);
-      console.log(`📦 Archived session file: ${sessionFile} -> ${archivedSessionFile}`);
-
-      // Archive the todos file if it exists and todos storage is configured
-      if (this.todosStorePath) {
-        const todosFile = join(this.todosStorePath, `${sessionId}.md`);
-        if (existsSync(todosFile)) {
-          const archivedTodosFile = join(this.todosStorePath, `.${sessionId}-${timestamp}.md`);
-          renameSync(todosFile, archivedTodosFile);
-          console.log(`📦 Archived todos file: ${todosFile} -> ${archivedTodosFile}`);
-        }
-
-        // Clean up symlink if it points to this session's todos file
-        this.cleanupSymlinkIfPointsToSession(sessionId);
-      }
-
-      console.log(`🗂️  Archived session via API: ${sessionId}`);
-
-      // Return success with no content
-      res.writeHead(204);
-      res.end();
-
-    } catch (error) {
-      console.error(`Error archiving session ${sessionId}:`, error);
-      this.sendHttpError(res, 500, 'Internal server error while archiving session');
-    }
-  }
-
-  private handleSwitchSession(sessionId: string, req: IncomingMessage, res: ServerResponse): void {
-    try {
-      // Validate session ID format
-      if (!/^[a-zA-Z0-9]+$/.test(sessionId)) {
-        this.sendHttpError(res, 400, 'Invalid session ID format');
-        return;
-      }
-
-      // Check if todos storage is configured
-      if (!this.todosStorePath) {
-        this.sendHttpError(res, 503, 'Todos storage not configured');
-        return;
-      }
-
-      // Check if session exists (either in session storage or has a todos file)
-      const sessionExists = this.sessionExists(sessionId);
-      if (!sessionExists) {
-        this.sendHttpError(res, 404, 'Session not found');
-        return;
-      }
-
-      // Create todos file if it doesn't exist
-      const targetPath = join(this.todosStorePath, `${sessionId}.md`);
-      if (!existsSync(targetPath)) {
-        this.createTodosFileForSession(sessionId);
-      }
-
-      // Update the symlink to point to this session
-      this.updateTodosSymlink(sessionId);
-
-      // Check if symlink update failed due to regular file conflict
-      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
-      const linkPath = join(workingDir, '.terraine', 'todos.md');
-      if (existsSync(linkPath)) {
-        try {
-          const stats = lstatSync(linkPath);
-          if (!stats.isSymbolicLink()) {
-            this.sendHttpError(res, 409, 'Cannot switch session: .terraine-todos.md exists as a regular file');
-            return;
-          }
-        } catch (linkError) {
-          this.sendHttpError(res, 500, 'Failed to create todos symbolic link');
-          return;
-        }
-      }
-
-      // Return success response
-      this.sendJsonResponse(res, 200, {
-        message: 'Session switched successfully',
-        sessionId,
-        todosFile: targetPath,
-        linkPath
-      });
-
-      console.log(`🔄 Switched to session: ${sessionId}`);
-
-    } catch (error) {
-      console.error(`Error switching to session ${sessionId}:`, error);
-      this.sendHttpError(res, 500, 'Internal server error while switching session');
-    }
-  }
-
-  private sessionExists(sessionId: string): boolean {
-    // Check if session has a log file (if session storage is configured)
-    if (this.sessionStorePath) {
-      const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
-      if (existsSync(sessionFile)) {
-        return true;
-      }
-    }
-
-    // Check if session has a todos file (if todos storage is configured)
-    if (this.todosStorePath) {
-      const todosFile = join(this.todosStorePath, `${sessionId}.md`);
-      if (existsSync(todosFile)) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  private createTodosFileForSession(sessionId: string): void {
-    if (!this.todosStorePath) {
-      return;
-    }
-
-    try {
-      const todosFilePath = join(this.todosStorePath, `${sessionId}.md`);
-      const todosTemplate = `# terraine.ai TODOs
-
-Created: ${new Date().toISOString()}
-
-`;
-
-      writeFileSync(todosFilePath, todosTemplate, 'utf-8');
-      console.log(`📝 Created todos file for session: ${todosFilePath}`);
-    } catch (error) {
-      console.error(`❌ Failed to create todos file for session ${sessionId}: ${error.message}`);
-    }
-  }
-
-  private updateTodosSymlink(sessionId: string): void {
-    if (!this.todosStorePath) {
-      console.log('⚠️  Cannot update todos symlink: TODOS_STORE_PATH not configured');
-      return;
-    }
-
-    try {
-      // Get working directory
-      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
-      const linkPath = join(workingDir, '.terraine', 'todos.md');
-      const targetPath = join(this.todosStorePath, `${sessionId}.md`);
-
-      // Remove existing link if it exists
-      if (existsSync(linkPath)) {
-        try {
-          const stats = lstatSync(linkPath);
-          if (stats.isSymbolicLink()) {
-            rmSync(linkPath);
-            console.log(`🔗 Removed existing todos link: ${linkPath}`);
-          } else {
-            // If it's a regular file, don't remove it - just log a warning
-            console.warn(`⚠️  Cannot update symlink: .terraine/todos.md exists as a regular file`);
-            return;
-          }
-        } catch (linkError) {
-          console.error(`Warning: Error checking/removing existing link: ${linkError.message}`);
-        }
-      }
-
-      // Create symbolic link
-      try {
-        symlinkSync(targetPath, linkPath);
-        console.log(`🔗 Updated todos symlink: ${linkPath} -> ${targetPath}`);
-      } catch (symlinkError) {
-        console.error(`Error creating symbolic link: ${symlinkError.message}`);
-      }
-
-    } catch (error) {
-      console.error(`❌ Failed to update todos symlink for session ${sessionId}: ${error.message}`);
-    }
-  }
-
-  private cleanupSymlinkIfPointsToSession(sessionId: string): void {
-    if (!this.todosStorePath) {
-      return;
-    }
-
-    try {
-      // Get working directory and symlink path
-      const workingDir = process.env.WORKING_DIRECTORY || process.cwd();
-      const linkPath = join(workingDir, '.terraine', 'todos.md');
-      const expectedTargetPath = join(this.todosStorePath, `${sessionId}.md`);
-
-      // Check if symlink exists
-      if (existsSync(linkPath)) {
-        try {
-          const stats = lstatSync(linkPath);
-          if (stats.isSymbolicLink()) {
-            // Read the symlink target
-            const currentTarget = readlinkSync(linkPath);
-            
-            // Check if it points to this session's todos file (handle both relative and absolute paths)
-            const absoluteCurrentTarget = resolve(workingDir, currentTarget);
-            const absoluteExpectedTarget = resolve(expectedTargetPath);
-            
-            if (absoluteCurrentTarget === absoluteExpectedTarget) {
-              rmSync(linkPath);
-              console.log(`🔗 Cleaned up symlink pointing to deleted session: ${linkPath}`);
-            }
-          }
-        } catch (linkError) {
-          // Symlink might be broken, try to remove it anyway
-          try {
-            rmSync(linkPath);
-            console.log(`🔗 Cleaned up broken symlink: ${linkPath}`);
-          } catch (removeError) {
-            console.error(`Warning: Could not clean up symlink: ${removeError.message}`);
-          }
-        }
-      }
-
-    } catch (error) {
-      console.error(`❌ Failed to cleanup symlink for session ${sessionId}: ${error.message}`);
-    }
-  }
-
-  private handleGetArtifacts(req: IncomingMessage, res: ServerResponse): void {
-    try {
-      const artifactsIndex = this.loadArtifactsIndex();
-
-      if (!artifactsIndex) {
-        // Return empty list if no index file is configured or available
-        this.sendJsonResponse(res, 200, { artifacts: [] });
-        return;
-      }
-
-      // Add relative_file_path to each artifact and rename overview to overview_md
-      const enrichedArtifacts = artifactsIndex.artifacts.map(artifact => ({
-        file_path: artifact.file_path,
-        overview_md: artifact.overview,
-        relative_file_path: basename(artifact.file_path)
-      }));
-
-      // Return the artifacts from the index file
-      this.sendJsonResponse(res, 200, {
-        artifacts: enrichedArtifacts,
-        artifacts_root_path: artifactsIndex.artifacts_root_path
-      });
-
-    } catch (error) {
-      console.error('Error handling /artifacts request:', error);
-      this.sendHttpError(res, 500, 'Internal server error while loading artifacts');
-    }
-  }
-
-  private handleListConnectors(req: IncomingMessage, res: ServerResponse): void {
-    try {
-      if (!this.connectorsStorePath) {
-        this.sendHttpError(res, 503, 'Connectors storage not configured');
-        return;
-      }
-
-      const connectors = this.loadConnectors();
-      this.sendJsonResponse(res, 200, { connectors });
-    } catch (error) {
-      console.error('Error handling /connectors request:', error);
-      this.sendHttpError(res, 500, 'Internal server error while loading connectors');
-    }
-  }
-
-  private handleCreateConnector(req: IncomingMessage, res: ServerResponse): void {
-    if (!this.connectorsStorePath) {
-      this.sendHttpError(res, 503, 'Connectors storage not configured');
-      return;
-    }
-
-    let body = '';
-    req.on('data', chunk => {
-      body += chunk.toString();
-    });
-
-    req.on('end', async () => {
-      try {
-        const requestData = JSON.parse(body);
-        
-        // Validate required fields
-        if (!requestData.name || !requestData.type) {
-          this.sendHttpError(res, 400, 'Missing required fields: name, type');
-          return;
-        }
-
-        if (requestData.type === 'local_file') {
-          await this.createLocalFileConnector(requestData, res);
-        } else if (requestData.type === 'gcs') {
-          await this.createGcsConnector(requestData, res);
-        } else {
-          this.sendHttpError(res, 400, 'Invalid connector type. Supported types: local_file, gcs');
-        }
-
-      } catch (parseError) {
-        this.sendHttpError(res, 400, 'Invalid JSON in request body');
-      }
-    });
-  }
-
-  private async createLocalFileConnector(requestData: any, res: ServerResponse): Promise<void> {
-    // Create local file connector in pending_upload state - files must be uploaded separately
-    const connector: DataConnector = {
-      id: this.generateConnectorId(),
-      name: requestData.name,
-      type: 'local_file',
-      config: {
-        filename: requestData.filename,
-        file_type: requestData.file_type,
-        encoding: requestData.encoding || 'utf-8'
-      },
-      status: 'pending_upload',
-      created_at: new Date().toISOString()
-    };
-
-    // Save connector
-    this.saveConnector(connector);
-    
-    console.log(`✅ Created local file connector: ${connector.id} (${connector.name}) - Status: ${connector.status}`);
-    this.sendJsonResponse(res, 201, connector);
-  }
-
-  private async createGcsConnector(requestData: any, res: ServerResponse): Promise<void> {
-    try {
-      // Validate GCS URL - check both top-level and config.gcs_url for backwards compatibility
-      const gcsUrl = requestData.config?.gcs_url || requestData.gcs_url;
-      if (!gcsUrl) {
-        this.sendHttpError(res, 400, 'Missing required field for GCS connector: config.gcs_url');
-        return;
-      }
-
-      const gcsConfig = parseGcsUrl(gcsUrl);
-      if (!gcsConfig) {
-        this.sendHttpError(res, 400, 'Invalid GCS URL format. Expected: gs://bucket-name or gs://bucket-name/path/to/subroot');
-        return;
-      }
-
-      // Check if gcsfuse is available
-      const gcsfuseInstalled = await checkGcsfuseInstalled();
-      if (!gcsfuseInstalled) {
-        this.sendHttpError(res, 503, 'gcsfuse is not installed or not available in PATH');
-        return;
-      }
-
-      // Determine mount point
-      const gcsMountRoot = join(process.cwd(), '.terraine', 'gcs');
-      const { bucketId, restrictToSubroot } = gcsConfig;
-      let mountPoint: string;
-      
-      if (restrictToSubroot) {
-        mountPoint = join(gcsMountRoot, bucketId, restrictToSubroot);
-      } else {
-        mountPoint = join(gcsMountRoot, bucketId);
-      }
-
-      // Create the connector
-      const connector: DataConnector = {
-        id: this.generateConnectorId(),
-        name: requestData.name,
-        type: 'gcs',
-        config: {
-          gcs_url: gcsUrl,
-          local_mount_point_path: mountPoint
-        },
-        status: 'active', // GCS connectors are immediately active after mounting
-        created_at: new Date().toISOString()
-      };
-
-      // Mount the GCS bucket
-      await mountGcsBucket(gcsConfig, mountPoint);
-      
-      // Save connector
-      this.saveConnector(connector);
-      
-      console.log(`✅ Created and mounted GCS connector: ${connector.id} (${connector.name}) - Mount: ${mountPoint}`);
-      this.sendJsonResponse(res, 201, connector);
-
-    } catch (error) {
-      console.error(`Failed to create GCS connector: ${error.message}`);
-      this.sendHttpError(res, 500, `Failed to mount GCS bucket: ${error.message}`);
-    }
-  }
-
-  private handleGetConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
-    try {
-      // Validate connector ID format
-      if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
-        this.sendHttpError(res, 400, 'Invalid connector ID format');
-        return;
-      }
-
-      if (!this.connectorsStorePath) {
-        this.sendHttpError(res, 503, 'Connectors storage not configured');
-        return;
-      }
-
-      const connectors = this.loadConnectors();
-      const connector = connectors.find(c => c.id === connectorId);
-      
-      if (!connector) {
-        this.sendHttpError(res, 404, 'Connector not found');
-        return;
-      }
-
-      // Only check file existence if connector has a file path and is supposed to be active
-      if (connector.config.file_path && connector.status === 'active') {
-        try {
-          if (!existsSync(connector.config.file_path)) {
-            connector.status = 'error';
-          }
-        } catch (error) {
-          console.error(`Error checking file existence: ${error.message}`);
-          connector.status = 'error';
-        }
-      }
-
-      this.sendJsonResponse(res, 200, connector);
-    } catch (error) {
-      console.error(`Error handling GET /connectors/${connectorId} request:`, error);
-      this.sendHttpError(res, 500, 'Internal server error while loading connector');
-    }
-  }
-
-  private handleDeleteConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
-    // Use async wrapper since we need to unmount GCS connectors
-    this.handleDeleteConnectorAsync(connectorId, req, res).catch(error => {
-      console.error(`Error handling DELETE /connectors/${connectorId} request:`, error);
-      this.sendHttpError(res, 500, 'Internal server error while deleting connector');
-    });
-  }
-
-  private async handleDeleteConnectorAsync(connectorId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // Validate connector ID format
-    if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
-      this.sendHttpError(res, 400, 'Invalid connector ID format');
-      return;
-    }
-
-    if (!this.connectorsStorePath) {
-      this.sendHttpError(res, 503, 'Connectors storage not configured');
-      return;
-    }
-
-    // Get connector before deletion to handle GCS unmounting
-    const connectors = this.loadConnectors();
-    const connector = connectors.find(c => c.id === connectorId);
-    
-    if (!connector) {
-      this.sendHttpError(res, 404, 'Connector not found');
-      return;
-    }
-
-    // If it's a GCS connector, unmount before deleting
-    if (connector.type === 'gcs' && connector.config.local_mount_point_path) {
-      try {
-        console.log(`🔄 Unmounting GCS connector: ${connector.name} from ${connector.config.local_mount_point_path}`);
-        await unmountGcsBucket(connector.config.local_mount_point_path);
-      } catch (error) {
-        console.warn(`⚠️  Failed to unmount GCS connector ${connectorId}: ${error.message}`);
-        // Continue with deletion even if unmount fails
-      }
-    }
-
-    const deleted = this.deleteConnectorFromStorage(connectorId);
-    
-    if (!deleted) {
-      this.sendHttpError(res, 404, 'Connector not found');
-      return;
-    }
-
-    console.log(`🗑️ Deleted connector: ${connectorId}`);
-    res.writeHead(204);
-    res.end();
-  }
-
-  private handleGetConnectorContent(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
-    try {
-      // Validate connector ID format
-      if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
-        this.sendHttpError(res, 400, 'Invalid connector ID format');
-        return;
-      }
-
-      if (!this.connectorsStorePath) {
-        this.sendHttpError(res, 503, 'Connectors storage not configured');
-        return;
-      }
-
-      const connectors = this.loadConnectors();
-      const connector = connectors.find(c => c.id === connectorId);
-      
-      if (!connector) {
-        this.sendHttpError(res, 404, 'Connector not found');
-        return;
-      }
-
-      if (connector.status !== 'active') {
-        this.sendHttpError(res, 409, `Connector is not active (status: ${connector.status})`);
-        return;
-      }
-
-      // Check if file exists
-      if (!connector.config.file_path || !existsSync(connector.config.file_path)) {
-        this.sendHttpError(res, 404, 'File not found');
-        return;
-      }
-
-      // Parse query parameters for chunking
-      const url = new URL(req.url || '', `http://${req.headers.host}`);
-      const offset = parseInt(url.searchParams.get('offset') || '0');
-      const limit = parseInt(url.searchParams.get('limit') || '0');
-      const bytesStart = parseInt(url.searchParams.get('bytes_start') || '0');
-      const bytesEnd = parseInt(url.searchParams.get('bytes_end') || '0');
-
-      try {
-        let content: string;
-        let chunkInfo: any = {};
-        
-        // Read file content
-        const fileContent = readFileSync(connector.config.file_path, connector.config.encoding || 'utf-8');
-        const metadata = this.getFileMetadata(connector.config.file_path);
-        
-        if (limit > 0) {
-          // Line-based chunking
-          const lines = fileContent.split('\n');
-          const endLine = offset + limit;
-          const selectedLines = lines.slice(offset, endLine);
-          content = selectedLines.join('\n');
-          
-          chunkInfo = {
-            offset,
-            limit,
-            total_lines: lines.length
-          };
-        } else if (bytesEnd > bytesStart) {
-          // Byte-based chunking
-          content = fileContent.substring(bytesStart, bytesEnd);
-          chunkInfo = {
-            bytes_start: bytesStart,
-            bytes_end: bytesEnd,
-            total_bytes: fileContent.length
-          };
-        } else {
-          // Full content
-          content = fileContent;
-        }
-
-        // Update last used timestamp
-        this.updateConnectorLastUsed(connectorId);
-
-        const response = {
-          connector_id: connectorId,
-          content,
-          encoding: connector.config.encoding || 'utf-8',
-          content_type: metadata?.mime_type || 'text/plain',
-          total_size: metadata?.file_size || 0,
-          ...(Object.keys(chunkInfo).length > 0 && { chunk_info: chunkInfo })
-        };
-
-        this.sendJsonResponse(res, 200, response);
-      } catch (readError) {
-        console.error(`Error reading file: ${readError.message}`);
-        this.sendHttpError(res, 500, 'Failed to read file content');
-      }
-    } catch (error) {
-      console.error(`Error handling GET /connectors/${connectorId}/content request:`, error);
-      this.sendHttpError(res, 500, 'Internal server error while reading connector content');
-    }
-  }
-
-  private handleUploadToConnector(connectorId: string, req: IncomingMessage, res: ServerResponse): void {
-    // Validate connector ID format
-    if (!/^conn_[a-zA-Z0-9]+$/.test(connectorId)) {
-      this.sendHttpError(res, 400, 'Invalid connector ID format');
-      return;
-    }
-
-    if (!this.connectorsStorePath) {
-      this.sendHttpError(res, 503, 'Connectors storage not configured');
-      return;
-    }
-
-    if (!this.uploadedFilesPath) {
-      this.sendHttpError(res, 503, 'File uploads not configured');
-      return;
-    }
-
-    // Find the connector
-    const connectors = this.loadConnectors();
-    const connector = connectors.find(c => c.id === connectorId);
-    
-    if (!connector) {
-      this.sendHttpError(res, 404, 'Connector not found');
-      return;
-    }
-
-    // GCS connectors don't support content uploads
-    if (connector.type === 'gcs') {
-      this.sendHttpError(res, 400, 'Content upload not supported for GCS connectors. Files are accessed directly via the mounted file system.');
-      return;
-    }
-
-    if (connector.status !== 'pending_upload') {
-      this.sendHttpError(res, 409, 'Connector is not in pending_upload status');
-      return;
-    }
-
-    // Read simple POST body content
-    let body = '';
-    req.on('data', chunk => {
-      body += chunk.toString();
-    });
-
-    req.on('end', () => {
-      try {
-        if (!body || body.trim().length === 0) {
-          this.sendHttpError(res, 400, 'Empty content body');
-          return;
-        }
-
-        // Use filename from connector config, or generate one if not specified
-        let filename: string;
-        if (connector.config.filename) {
-          // Use the filename specified during connector creation
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const ext = extname(connector.config.filename);
-          const baseName = basename(connector.config.filename, ext);
-          filename = `${connectorId}_${baseName}_${timestamp}${ext}`;
-        } else {
-          // Fallback to generated filename based on file type
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const fileExtension = connector.config.file_type === 'csv' ? '.csv' : 
-                               connector.config.file_type === 'json' ? '.json' : '.txt';
-          filename = `${connectorId}_${timestamp}${fileExtension}`;
-        }
-        const filePath = join(this.uploadedFilesPath, filename);
-
-        // Write file content
-        writeFileSync(filePath, body, connector.config.encoding || 'utf-8');
-
-        // Get file metadata
-        const metadata = this.getFileMetadata(filePath);
-        if (!metadata) {
-          this.sendHttpError(res, 500, 'Failed to read uploaded file metadata');
-          return;
-        }
-
-        // Update connector with file information
-        const updates: Partial<DataConnector> = {
-          config: {
-            ...connector.config,
-            file_path: filePath,
-            file_type: connector.config.file_type || this.detectFileType(filePath, metadata.mime_type)
-          },
-          status: 'active',
-          metadata
-        };
-
-        const updateSuccess = this.updateConnectorInStorage(connectorId, updates);
-        if (!updateSuccess) {
-          this.sendHttpError(res, 500, 'Failed to update connector');
-          return;
-        }
-
-        // Get updated connector to return
-        const updatedConnectors = this.loadConnectors();
-        const updatedConnector = updatedConnectors.find(c => c.id === connectorId);
-        
-        console.log(`✅ Uploaded content to connector: ${connectorId} (${connector.name})`);
-        this.sendJsonResponse(res, 200, updatedConnector);
-
-      } catch (writeError) {
-        console.error('Error writing uploaded content:', writeError);
-        this.sendHttpError(res, 500, 'Failed to save uploaded content');
-      }
-    });
-  }
-
 
   private sendJsonResponse(res: ServerResponse, statusCode: number, data: any): void {
     res.setHeader('Content-Type', 'application/json');
@@ -1498,10 +626,26 @@ Created: ${new Date().toISOString()}
       // Initialize GCS functionality
       await this.initializeGcs();
 
+      // Initialize REST handlers after all storage paths are set
+      this.restHandlers = new RestHandlers(
+        this.connectorsStorePath,
+        this.uploadedFilesPath,
+        this.sessionStorePath,
+        this.todosStorePath
+      );
+
     } catch (error) {
       console.error(`❌ Failed to initialize connectors storage: ${error.message}`);
       this.connectorsStorePath = null;
       this.uploadedFilesPath = null;
+      
+      // Still initialize REST handlers even if storage failed
+      this.restHandlers = new RestHandlers(
+        this.connectorsStorePath,
+        this.uploadedFilesPath,
+        this.sessionStorePath,
+        this.todosStorePath
+      );
     }
   }
 
@@ -1797,34 +941,6 @@ Created: ${new Date().toISOString()}
     this.logSessionEvent(sessionEvent);
   }
 
-  private loadArtifactsIndex(): ArtifactsIndex | null {
-    const workingDir = process.env.WORKING_DIRECTORY;
-    const artifactsIndexPath = join(workingDir, '.terraine', 'artifact_catalog.json');
-
-    if (!existsSync(artifactsIndexPath)) {
-      console.error(`❌ Artifacts index file not found: ${artifactsIndexPath}`);
-      return null;
-    }
-
-    try {
-      const fileContent = readFileSync(artifactsIndexPath, 'utf-8');
-      const artifactsIndex: ArtifactsIndex = JSON.parse(fileContent);
-
-      // Validate the structure
-      if (!artifactsIndex.artifacts_root_path || !Array.isArray(artifactsIndex.artifacts)) {
-        console.error('❌ Invalid artifacts index structure');
-        return null;
-      }
-
-      console.log(`✅ Loaded ${artifactsIndex.artifacts.length} artifacts from ${artifactsIndexPath}`);
-      return artifactsIndex;
-
-    } catch (error) {
-      console.error(`❌ Error reading artifacts index file: ${error.message}`);
-      return null;
-    }
-  }
-
   private loadConnectors(): DataConnector[] {
     if (!this.connectorsStorePath) {
       return [];
@@ -1855,125 +971,12 @@ Created: ${new Date().toISOString()}
     }
   }
 
-  private saveConnector(connector: DataConnector): void {
-    if (!this.connectorsStorePath) {
-      throw new Error('Connectors storage not configured');
-    }
-
-    try {
-      const connectorLine = JSON.stringify(connector) + '\n';
-      appendFileSync(this.connectorsStorePath, connectorLine);
-    } catch (error) {
-      throw new Error(`Failed to save connector: ${error.message}`);
-    }
-  }
-
-  private deleteConnectorFromStorage(connectorId: string): boolean {
-    if (!this.connectorsStorePath) {
-      return false;
-    }
-
-    try {
-      const connectors = this.loadConnectors();
-      const filteredConnectors = connectors.filter(c => c.id !== connectorId);
-      
-      if (filteredConnectors.length === connectors.length) {
-        return false; // Connector not found
-      }
-
-      // Rewrite the file with remaining connectors
-      const content = filteredConnectors.map(c => JSON.stringify(c)).join('\n') + (filteredConnectors.length > 0 ? '\n' : '');
-      writeFileSync(this.connectorsStorePath, content);
-      return true;
-    } catch (error) {
-      console.error(`Error deleting connector: ${error.message}`);
-      return false;
-    }
-  }
-
-  private updateConnectorLastUsed(connectorId: string): void {
-    if (!this.connectorsStorePath) {
-      return;
-    }
-
-    try {
-      const connectors = this.loadConnectors();
-      const connector = connectors.find(c => c.id === connectorId);
-      
-      if (connector) {
-        connector.last_used = new Date().toISOString();
-        
-        // Rewrite the file with updated connector
-        const content = connectors.map(c => JSON.stringify(c)).join('\n') + '\n';
-        writeFileSync(this.connectorsStorePath, content);
-      }
-    } catch (error) {
-      console.error(`Error updating connector last used: ${error.message}`);
-    }
-  }
-
-  private updateConnectorInStorage(connectorId: string, updates: Partial<DataConnector>): boolean {
-    if (!this.connectorsStorePath) {
-      return false;
-    }
-
-    try {
-      const connectors = this.loadConnectors();
-      const connectorIndex = connectors.findIndex(c => c.id === connectorId);
-      
-      if (connectorIndex === -1) {
-        return false; // Connector not found
-      }
-
-      // Apply updates
-      connectors[connectorIndex] = { ...connectors[connectorIndex], ...updates };
-        
-      // Rewrite the file with updated connector
-      const content = connectors.map(c => JSON.stringify(c)).join('\n') + '\n';
-      writeFileSync(this.connectorsStorePath, content);
-      return true;
-    } catch (error) {
-      console.error(`Error updating connector: ${error.message}`);
-      return false;
-    }
-  }
-
-  private generateConnectorId(): string {
-    return 'conn_' + randomUUID().replace(/-/g, '').substring(0, 12);
-  }
-
   private detectFileType(filePath: string, mimeType?: string): string {
-    const ext = extname(filePath).toLowerCase();
-    
-    if (ext === '.csv') return 'csv';
-    if (ext === '.json') return 'json';
-    if (ext === '.txt' || ext === '.md' || ext === '.log') return 'text';
-    if (mimeType && mimeType.startsWith('text/')) return 'text';
-    
-    return 'binary';
+    return detectFileType(filePath, mimeType);
   }
 
   private getFileMetadata(filePath: string): { file_size: number; mime_type: string; last_modified: string } | null {
-    try {
-      const stats = statSync(filePath);
-      const ext = extname(filePath).toLowerCase();
-      
-      let mimeType = 'application/octet-stream';
-      if (ext === '.txt') mimeType = 'text/plain';
-      else if (ext === '.csv') mimeType = 'text/csv';
-      else if (ext === '.json') mimeType = 'application/json';
-      else if (ext === '.md') mimeType = 'text/markdown';
-      else if (ext === '.log') mimeType = 'text/plain';
-      
-      return {
-        file_size: stats.size,
-        mime_type: mimeType,
-        last_modified: stats.mtime.toISOString()
-      };
-    } catch (error) {
-      console.error(`Error getting file metadata: ${error.message}`);
-      return null;
-    }
+    return getFileMetadata(filePath);
   }
 
   private setupWebSocketServer() {
@@ -2633,6 +1636,122 @@ Created: ${new Date().toISOString()}
 
   public async manualCompact(): Promise<void> {
     await this.handleManualCompaction();
+  }
+}
+
+export function loadArtifactsIndex(): ArtifactsIndex | null {
+  const workingDir = process.env.WORKING_DIRECTORY;
+  const artifactsIndexPath = join(workingDir, '.terraine', 'artifact_catalog.json');
+
+  if (!existsSync(artifactsIndexPath)) {
+    console.error(`❌ Artifacts index file not found: ${artifactsIndexPath}`);
+    return null;
+  }
+
+  try {
+    const fileContent = readFileSync(artifactsIndexPath, 'utf-8');
+    const artifactsIndex: ArtifactsIndex = JSON.parse(fileContent);
+
+    // Validate the structure
+    if (!artifactsIndex.artifacts_root_path || !Array.isArray(artifactsIndex.artifacts)) {
+      console.error('❌ Invalid artifacts index structure');
+      return null;
+    }
+
+    console.log(`✅ Loaded ${artifactsIndex.artifacts.length} artifacts from ${artifactsIndexPath}`);
+    return artifactsIndex;
+
+  } catch (error) {
+    console.error(`❌ Error reading artifacts index file: ${error.message}`);
+    return null;
+  }
+}
+
+// Exported helper functions for RestHandlers
+export function updateConnectorLastUsed(connectorId: string, connectorsStorePath: string | null): void {
+  if (!connectorsStorePath) {
+    return;
+  }
+
+  try {
+    const content = readFileSync(connectorsStorePath, 'utf-8');
+    const lines = content.trim().split('\n').filter(line => line.trim());
+    const connectors: DataConnector[] = lines.map(line => JSON.parse(line));
+    
+    const connector = connectors.find(c => c.id === connectorId);
+    
+    if (connector) {
+      connector.last_used = new Date().toISOString();
+      
+      // Rewrite the file with updated connector
+      const updatedContent = connectors.map(c => JSON.stringify(c)).join('\n') + '\n';
+      writeFileSync(connectorsStorePath, updatedContent);
+    }
+  } catch (error) {
+    console.error(`Error updating connector last used: ${error.message}`);
+  }
+}
+
+export function updateConnectorInStorage(connectorId: string, updates: Partial<DataConnector>, connectorsStorePath: string | null): boolean {
+  if (!connectorsStorePath) {
+    return false;
+  }
+
+  try {
+    const content = readFileSync(connectorsStorePath, 'utf-8');
+    const lines = content.trim().split('\n').filter(line => line.trim());
+    const connectors: DataConnector[] = lines.map(line => JSON.parse(line));
+    
+    const connectorIndex = connectors.findIndex(c => c.id === connectorId);
+    
+    if (connectorIndex === -1) {
+      return false; // Connector not found
+    }
+
+    // Apply updates
+    connectors[connectorIndex] = { ...connectors[connectorIndex], ...updates };
+      
+    // Rewrite the file with updated connector
+    const updatedContent = connectors.map(c => JSON.stringify(c)).join('\n') + '\n';
+    writeFileSync(connectorsStorePath, updatedContent);
+    return true;
+  } catch (error) {
+    console.error(`Error updating connector: ${error.message}`);
+    return false;
+  }
+}
+
+export function detectFileType(filePath: string, mimeType?: string): string {
+  const ext = extname(filePath).toLowerCase();
+  
+  if (ext === '.csv') return 'csv';
+  if (ext === '.json') return 'json';
+  if (ext === '.txt' || ext === '.md' || ext === '.log') return 'text';
+  if (mimeType && mimeType.startsWith('text/')) return 'text';
+  
+  return 'binary';
+}
+
+export function getFileMetadata(filePath: string): { file_size: number; mime_type: string; last_modified: string } | null {
+  try {
+    const stats = statSync(filePath);
+    const ext = extname(filePath).toLowerCase();
+    
+    let mimeType = 'application/octet-stream';
+    if (ext === '.txt') mimeType = 'text/plain';
+    else if (ext === '.csv') mimeType = 'text/csv';
+    else if (ext === '.json') mimeType = 'application/json';
+    else if (ext === '.md') mimeType = 'text/markdown';
+    else if (ext === '.log') mimeType = 'text/plain';
+    
+    return {
+      file_size: stats.size,
+      mime_type: mimeType,
+      last_modified: stats.mtime.toISOString()
+    };
+  } catch (error) {
+    console.error(`Error getting file metadata: ${error.message}`);
+    return null;
   }
 }
 
