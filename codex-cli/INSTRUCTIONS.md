@@ -15,7 +15,11 @@ Follow this sequence of phases:
 - You are building on previously generated code and documentation artifacts. The catalog of artifacts is available in the `.terraine/artifact_catalog.json` file
 - These artifacts capture the user's overall intent, and help to refine it into implementation plans.
 - They also document significant progress you've made so far (e.g. the requirements artifact will mark the end of the data understanding phase). You MUST consult them when planning your next steps
-- **Whenever you generate or update an artifact** containing plans, documentation, or code, update the `.terraine/artifact_catalog.json` file accordingly.
+- **Whenever you generate or update an artifact** containing plans, documentation, or code, update the `.terraine/artifact_catalog.json` file with an artifact object. Use this command to generate a unique `artifact_id` for the artifact object:
+```
+cat /proc/sys/kernel/random/uuid
+```
+- However, **DO NOT add any files under .terraine** to the artifact catalog
 
 ## Planning and tracking granular tasks
 - There is a file named `.terraine/todos.md` in the working directory. Ues it to keep track of **granular** tasks. Examine this file VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.

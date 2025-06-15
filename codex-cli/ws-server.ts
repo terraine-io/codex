@@ -876,12 +876,7 @@ class WebSocketAgentServer {
       
       // Only create if it doesn't already exist
       if (!existsSync(todosFilePath)) {
-        const todosTemplate = `# terraine.ai TODOs
-
-Created: ${new Date().toISOString()}
-
-
-`;
+        const todosTemplate = '# terraine.ai TODOs';
 
         writeFileSync(todosFilePath, todosTemplate, 'utf-8');
         console.log(`📝 Created todos file: ${todosFilePath}`);
@@ -980,6 +975,7 @@ Created: ${new Date().toISOString()}
   }
 
   private setupWebSocketServer() {
+    console.log(`CODEX_UNSAFE_ALLOW_NO_SANDBOX=${process.env.CODEX_UNSAFE_ALLOW_NO_SANDBOX}`);
     this.wss.on('connection', (ws, req) => {
       // Extract session ID from WebSocket path
       const sessionId = this.extractSessionIdFromPath(req.url || '');
