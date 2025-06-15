@@ -872,13 +872,12 @@ class WebSocketAgentServer {
     }
 
     try {
-      const todosFilePath = join(this.todosStorePath, `${this.currentSessionId}.md`);
+      const todosFilePath = join(this.todosStorePath, `${this.currentSessionId}.json`);
       
       // Only create if it doesn't already exist
       if (!existsSync(todosFilePath)) {
-        const todosTemplate = '# terraine.ai TODOs';
-
-        writeFileSync(todosFilePath, todosTemplate, 'utf-8');
+        const emptyTodoFile = { items: [] };
+        writeFileSync(todosFilePath, JSON.stringify(emptyTodoFile, null, 2), 'utf-8');
         console.log(`📝 Created todos file: ${todosFilePath}`);
       } else {
         console.log(`📝 Todos file already exists: ${todosFilePath}`);
@@ -1007,7 +1006,11 @@ class WebSocketAgentServer {
         try {
           const message: WSMessage = JSON.parse(data.toString());
 
-          // Log incoming message
+          // Basic activity logging for monitoring
+          const sessionInfo = this.currentSessionId ? ` [session: ${this.currentSessionId.substring(0, 8)}...]` : '';
+          console.log(`📨 WebSocket message received: type=${message.type}, id=${message.id}${sessionInfo}`);
+
+          // Log incoming message to session storage
           this.logIncomingMessage(message);
 
           await this.handleMessage(message);
@@ -1465,6 +1468,12 @@ class WebSocketAgentServer {
 
       if (!isStreamingFragment) {
         this.logOutgoingMessage(message);
+      }
+
+      // Basic activity logging for monitoring (but avoid spamming with streaming fragments)
+      if (!isStreamingFragment || message.type !== 'response_item') {
+        const sessionInfo = this.currentSessionId ? ` [session: ${this.currentSessionId.substring(0, 8)}...]` : '';
+        console.log(`📤 WebSocket message sent: type=${message.type}, id=${message.id}${sessionInfo}`);
       }
 
       this.ws.send(JSON.stringify(message));

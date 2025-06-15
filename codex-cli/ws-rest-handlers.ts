@@ -157,27 +157,10 @@ export class RestHandlers {
           mkdirSync(this.todosStorePath, { recursive: true });
         }
         
-        const todosFile = join(this.todosStorePath, `${sessionId}.md`);
-        const todosContent = `# Terraine Session Todos
-
-Session ID: \`${sessionId}\`
-Created: ${timestamp}
-
-This file helps the agent plan and track tasks for the current session.
-
-## Current Tasks
-
-- [ ] No tasks yet - add your goals here
-
-## Completed Tasks
-
-(Tasks will be moved here when completed)
-
----
-
-*This file was auto-created for session tracking. You can edit it manually or let the agent update it.*
-`;
-        writeFileSync(todosFile, todosContent);
+        const todosFile = join(this.todosStorePath, `${sessionId}.json`);
+        // Create empty JSON todos file
+        const emptyTodoFile = { items: [] };
+        writeFileSync(todosFile, JSON.stringify(emptyTodoFile, null, 2), 'utf-8');
       }
 
       const sessionInfo: SessionInfo = {
@@ -228,9 +211,9 @@ This file helps the agent plan and track tasks for the current session.
 
       // Archive todos file if it exists
       if (this.todosStorePath) {
-        const todosFile = join(this.todosStorePath, `${sessionId}.md`);
+        const todosFile = join(this.todosStorePath, `${sessionId}.json`);
         if (existsSync(todosFile)) {
-          const archivedTodosFile = join(this.todosStorePath, `.${sessionId}-${timestamp}.md`);
+          const archivedTodosFile = join(this.todosStorePath, `.${sessionId}-${timestamp}.json`);
           try {
             renameSync(todosFile, archivedTodosFile);
             console.log(`📚 Todos archived: ${todosFile} -> ${archivedTodosFile}`);
@@ -240,13 +223,13 @@ This file helps the agent plan and track tasks for the current session.
         }
 
         // Clean up symlink if it points to this session
-        const symlinkPath = join(process.cwd(), '.terraine-todos.md');
+        const symlinkPath = join(process.cwd(), '.terraine', 'todos.json');
         if (existsSync(symlinkPath)) {
           try {
             const stats = lstatSync(symlinkPath);
             if (stats.isSymbolicLink()) {
               const linkTarget = readlinkSync(symlinkPath);
-              if (linkTarget.includes(`${sessionId}.md`)) {
+              if (linkTarget.includes(`${sessionId}.json`)) {
                 unlinkSync(symlinkPath);
                 console.log(`🧹 Cleaned up symlink: ${symlinkPath}`);
               }
@@ -277,26 +260,20 @@ This file helps the agent plan and track tasks for the current session.
         return;
       }
 
-      // Validate session ID format
-      if (!/^[a-f0-9]{40}$/.test(sessionId)) {
-        this.sendHttpError(res, 400, 'Invalid session ID format');
-        return;
-      }
-
       const sessionFile = join(this.sessionStorePath, `${sessionId}.jsonl`);
       if (!existsSync(sessionFile)) {
         this.sendHttpError(res, 404, 'Session not found');
         return;
       }
 
-      const todosFile = join(this.todosStorePath, `${sessionId}.md`);
-      const symlinkPath = join(process.cwd(), '.terraine-todos.md');
+      const todosFile = join(this.todosStorePath, `${sessionId}.json`);
+      const symlinkPath = join(process.cwd(), '.terraine', 'todos.json');
 
-      // Check if .terraine-todos.md exists as a regular file (protect it)
+      // Check if .terraine/todos.json exists as a regular file (protect it)
       if (existsSync(symlinkPath)) {
         const stats = lstatSync(symlinkPath);
         if (!stats.isSymbolicLink()) {
-          this.sendHttpError(res, 409, 'Conflict: .terraine-todos.md exists as a regular file and cannot be overwritten');
+          this.sendHttpError(res, 409, 'Conflict: .terraine/todos.json exists as a regular file and cannot be overwritten');
           return;
         }
         // Remove existing symlink
@@ -309,27 +286,15 @@ This file helps the agent plan and track tasks for the current session.
           mkdirSync(this.todosStorePath, { recursive: true });
         }
         
-        const timestamp = new Date().toISOString();
-        const todosContent = `# Terraine Session Todos
+        // Create empty JSON todos file
+        const emptyTodoFile = { items: [] };
+        writeFileSync(todosFile, JSON.stringify(emptyTodoFile, null, 2), 'utf-8');
+      }
 
-Session ID: \`${sessionId}\`
-Created: ${timestamp}
-
-This file helps the agent plan and track tasks for the current session.
-
-## Current Tasks
-
-- [ ] No tasks yet - add your goals here
-
-## Completed Tasks
-
-(Tasks will be moved here when completed)
-
----
-
-*This file was auto-created for session tracking. You can edit it manually or let the agent update it.*
-`;
-        writeFileSync(todosFile, todosContent);
+      // Ensure .terraine directory exists in working directory
+      const terraineDirPath = join(process.cwd(), '.terraine');
+      if (!existsSync(terraineDirPath)) {
+        mkdirSync(terraineDirPath, { recursive: true });
       }
 
       // Create symlink
@@ -339,7 +304,7 @@ This file helps the agent plan and track tasks for the current session.
         session_id: sessionId,
         todos_file: todosFile,
         symlink_path: symlinkPath,
-        message: `Switched to session ${sessionId}. Agent can now access todos via .terraine-todos.md`
+        message: `Switched to session ${sessionId}. Agent can now access todos via .terraine/todos.json`
       };
 
       this.sendJsonResponse(res, 200, switchInfo);
