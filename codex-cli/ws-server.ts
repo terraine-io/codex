@@ -302,7 +302,10 @@ class WebSocketAgentServer {
       verifyClient: (info) => this.verifyClient(info)
     });
 
-    const jupyterMcpTools = await this.setupJupyterMcpServer();
+    let jupyterMcpTools: Array<ClaudeTool> = [];
+    if (process.env.ENABLE_JUPYTER_MCP_SERVER === 'true') {
+      jupyterMcpTools = await this.setupJupyterMcpServer();    
+    }
 
     await this.setupWebSocketServer(jupyterMcpTools);
 
@@ -688,30 +691,9 @@ class WebSocketAgentServer {
     this.jupyterMcpWrapper = new JupyterMcpWrapper(configPath!);
 
     await this.jupyterMcpWrapper.initialize();
-    const toolNames = await this.jupyterMcpWrapper.retrieveTools();
+    const tools = await this.jupyterMcpWrapper.retrieveTools();
 
-    return toolNames;
-  }
-
-  private generateSessionId(): string {
-    return randomUUID().replace(/-/g, '');
-  }
-
-  private startNewSession(): void {
-    if (!this.sessionStorePath) {
-      return; // Session logging not configured
-    }
-
-    this.currentSessionId = this.generateSessionId();
-    const sessionEvent: SessionEvent = {
-      timestamp: new Date().toISOString(),
-      event_type: 'websocket_message_received',
-      direction: 'incoming',
-      message_data: { event: 'session_started' }
-    };
-
-    this.logSessionEvent(sessionEvent);
-    console.log(`🆔 Started new session: ${this.currentSessionId}`);
+    return tools;
   }
 
   private startSessionWithId(sessionId: string): void {
@@ -912,7 +894,7 @@ class WebSocketAgentServer {
     this.logSessionEvent(sessionEvent);
   }
 
-  private setupWebSocketServer(jupyterTools: Array<MCPTool>) {
+  private setupWebSocketServer(jupyterTools: Array<ClaudeTool>) {
     console.log(`CODEX_UNSAFE_ALLOW_NO_SANDBOX=${process.env.CODEX_UNSAFE_ALLOW_NO_SANDBOX}`);
     this.wss.on('connection', (ws, req) => {
       // Extract session ID from WebSocket path
@@ -973,7 +955,7 @@ class WebSocketAgentServer {
     });
   }
 
-  private initializeAgentLoop(mcpTools: Array<MCPTool>, seedInput?: Array<ResponseInputItem>, resumeTranscript?: Array<ResponseInputItem>) {
+  private initializeAgentLoop(mcpTools: Array<ClaudeTool>, seedInput?: Array<ResponseInputItem>, resumeTranscript?: Array<ResponseInputItem>) {
     // Clean up any existing agent loop and reset state
     if (this.agentLoop) {
       console.log('Terminating existing AgentLoop');
@@ -1308,6 +1290,8 @@ class WebSocketAgentServer {
       if (contextInfo.usagePercent > 90) {
         console.log(`Context usage high (${contextInfo.usagePercent.toFixed(1)}%), considering auto-compaction`);
       }
+
+      console.log(`Invoking agentLoop.run`);
 
       // Since we're using disableResponseStorage: true, we don't need previousResponseId
       // Each request is self-contained and doesn't rely on server-side conversation state
