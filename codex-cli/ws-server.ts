@@ -3,21 +3,21 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { URL } from 'url';
-import { readFileSync, existsSync, mkdirSync, appendFileSync, readdirSync, statSync, unlinkSync, writeFileSync, symlinkSync, lstatSync, rmSync, renameSync, readlinkSync, createWriteStream } from 'fs';
-import { basename, join, resolve as resolvePath, extname } from 'path';
+import { readFileSync, existsSync, mkdirSync, appendFileSync, statSync, writeFileSync } from 'fs';
+import { join, resolve, extname } from 'path';
 import { AgentLoopFactory, type IAgentLoop, type CommandConfirmation } from './src/utils/agent/index.js';
+import { type ClaudeTool } from './src/utils/agent/claude-types.js';
 import type { ApplyPatchCommand, ApprovalPolicy } from './src/approvals.js';
 import type { ResponseItem, ResponseInputItem } from 'openai/resources/responses/responses.mjs';
 import type { AppConfig } from './src/utils/config.js';
-import { ReviewDecision } from './src/utils/agent/review.js';
 import { ContextManager, createContextManager, type ContextInfo } from './context-managers.js';
 import { randomUUID } from 'crypto';
 import { config } from 'dotenv';
-import { resolve } from 'path';
 import { initLogger, debug } from './src/utils/logger/log.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { RestHandlers } from './ws-rest-handlers.js';
+import { JupyterMcpWrapper } from './ws-mcp-cli.js';
 
 // Load environment variables and configure working directory
 function initializeEnvironment() {
@@ -100,52 +100,9 @@ interface UserInputMessage extends WSMessage {
   };
 }
 
-interface ApprovalRequestMessage extends WSMessage {
-  type: 'approval_request';
-  payload: {
-    command: Array<string>;
-    applyPatch?: ApplyPatchCommand;
-  };
-}
-
 interface ApprovalResponseMessage extends WSMessage {
   type: 'approval_response';
   payload: CommandConfirmation;
-}
-
-interface ResponseItemMessage extends WSMessage {
-  type: 'response_item';
-  payload: ResponseItem;
-}
-
-interface LoadingStateMessage extends WSMessage {
-  type: 'loading_state';
-  payload: { loading: boolean };
-}
-
-interface ErrorMessage extends WSMessage {
-  type: 'error';
-  payload: { message: string; details?: any };
-}
-
-interface AgentFinishedMessage extends WSMessage {
-  type: 'agent_finished';
-  payload: { responseId: string };
-}
-
-interface ContextInfoMessage extends WSMessage {
-  type: 'context_info';
-  payload: ContextInfo;
-}
-
-interface ContextCompactedMessage extends WSMessage {
-  type: 'context_compacted';
-  payload: {
-    oldTokenCount: number;
-    newTokenCount: number;
-    reductionPercent: number;
-    strategy: string;
-  };
 }
 
 // Types for artifacts
@@ -310,6 +267,7 @@ class WebSocketAgentServer {
   private uploadedFilesPath: string | null = null;
   private messageFragments: Map<string, ResponseItem[]> = new Map();
   private restHandlers: RestHandlers;
+  private jupyterMcpWrapper: JupyterMcpWrapper;
 
   // Fragment collection for turn-based message logging:
   // Collects streaming message fragments during a conversation turn and combines
@@ -319,6 +277,10 @@ class WebSocketAgentServer {
   // Note: lastResponseId is not needed when disableResponseStorage: true
 
   constructor(port: number = 8080) {
+    this.initialize(port);
+  }
+
+  private async initialize(port: number) {
     // Parse allowed origins from environment variable
     this.allowedOrigins = this.parseAllowedOrigins();
 
@@ -329,7 +291,7 @@ class WebSocketAgentServer {
     this.initializeTodosStorage();
     
     // Initialize connectors storage (including GCS)
-    this.initializeConnectorsStorageAsync();
+    await this.initializeConnectorsStorageAsync();
 
     // Create HTTP server first
     this.httpServer = createServer((req, res) => this.handleHttpRequest(req, res));
@@ -340,7 +302,9 @@ class WebSocketAgentServer {
       verifyClient: (info) => this.verifyClient(info)
     });
 
-    this.setupWebSocketServer();
+    const jupyterMcpTools = await this.setupJupyterMcpServer();
+
+    await this.setupWebSocketServer(jupyterMcpTools);
 
     // Start the HTTP server
     this.httpServer.listen(port, () => {
@@ -716,6 +680,19 @@ class WebSocketAgentServer {
     }
   }
 
+  private async setupJupyterMcpServer(): Promise<Array<ClaudeTool>> {
+    const configPath: string|undefined = process.env.JUPYTER_MCP_SERVER_CONFIG_JSON_PATH;
+    if (!configPath) {
+        throw new Error('Set JUPYTER_MCP_SERVER_CONFIG_JSON_PATH in env before launching.');
+    }
+    this.jupyterMcpWrapper = new JupyterMcpWrapper(configPath!);
+
+    await this.jupyterMcpWrapper.initialize();
+    const toolNames = await this.jupyterMcpWrapper.retrieveTools();
+
+    return toolNames;
+  }
+
   private generateSessionId(): string {
     return randomUUID().replace(/-/g, '');
   }
@@ -935,45 +912,7 @@ class WebSocketAgentServer {
     this.logSessionEvent(sessionEvent);
   }
 
-  private loadConnectors(): DataConnector[] {
-    if (!this.connectorsStorePath) {
-      return [];
-    }
-
-    try {
-      if (!existsSync(this.connectorsStorePath)) {
-        return [];
-      }
-
-      const content = readFileSync(this.connectorsStorePath, 'utf-8');
-      const lines = content.trim().split('\n').filter(line => line.length > 0);
-
-      const connectors: DataConnector[] = [];
-      for (const line of lines) {
-        try {
-          const connector: DataConnector = JSON.parse(line);
-          connectors.push(connector);
-        } catch (parseError) {
-          console.error(`Error parsing connector line: ${parseError.message}`);
-        }
-      }
-
-      return connectors;
-    } catch (error) {
-      console.error(`Error loading connectors: ${error.message}`);
-      return [];
-    }
-  }
-
-  private detectFileType(filePath: string, mimeType?: string): string {
-    return detectFileType(filePath, mimeType);
-  }
-
-  private getFileMetadata(filePath: string): { file_size: number; mime_type: string; last_modified: string } | null {
-    return getFileMetadata(filePath);
-  }
-
-  private setupWebSocketServer() {
+  private setupWebSocketServer(jupyterTools: Array<MCPTool>) {
     console.log(`CODEX_UNSAFE_ALLOW_NO_SANDBOX=${process.env.CODEX_UNSAFE_ALLOW_NO_SANDBOX}`);
     this.wss.on('connection', (ws, req) => {
       // Extract session ID from WebSocket path
@@ -1000,7 +939,7 @@ class WebSocketAgentServer {
       }
 
       // Initialize AgentLoop when client connects, with session resumption if available
-      this.initializeAgentLoop(undefined, resumeTranscript.length > 0 ? resumeTranscript : undefined);
+      this.initializeAgentLoop(jupyterTools, undefined /* seedInput */, resumeTranscript.length > 0 ? resumeTranscript : undefined);
 
       ws.on('message', async (data) => {
         try {
@@ -1034,7 +973,7 @@ class WebSocketAgentServer {
     });
   }
 
-  private initializeAgentLoop(seedInput?: Array<ResponseInputItem>, resumeTranscript?: Array<ResponseInputItem>) {
+  private initializeAgentLoop(mcpTools: Array<MCPTool>, seedInput?: Array<ResponseInputItem>, resumeTranscript?: Array<ResponseInputItem>) {
     // Clean up any existing agent loop and reset state
     if (this.agentLoop) {
       console.log('Terminating existing AgentLoop');
@@ -1226,6 +1165,8 @@ class WebSocketAgentServer {
           });
         }
       },
+
+      mcpTools: mcpTools,
     });
 
     // If we have seed input (from compaction), run it to initialize the transcript
@@ -1771,7 +1712,7 @@ if (logger.isLoggingEnabled()) {
 }
 
 // Example usage
-const server = new WebSocketAgentServer(8080);
+const server = new WebSocketAgentServer(8080, './jupyter-mcp-server.json');
 
 // Graceful shutdown
 process.on('SIGINT', () => {

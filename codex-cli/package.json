@@ -30,6 +30,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.53.0",
     "@inkjs/ui": "^2.0.0",
+    "@modelcontextprotocol/sdk": "^1.12.3",
     "@types/ws": "^8.18.1",
     "chalk": "^5.2.0",
     "diff": "^7.0.0",

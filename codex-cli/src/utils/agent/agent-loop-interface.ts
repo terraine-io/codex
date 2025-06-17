@@ -1,6 +1,8 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses.mjs";
 import type { ApprovalPolicy } from "../../approvals.js";
 import type { AppConfig } from "../config.js";
+import { type ClaudeTool } from './claude-types.js';
+
 
 /**
  * Configuration for creating agent loop instances across different providers
@@ -48,6 +50,10 @@ export interface AgentLoopCallbacks {
   onLastResponseId: (lastResponseId: string) => void;
 }
 
+export interface AgentMcpTools {
+  mcpTools: Array<ClaudeTool>;
+}
+
 /**
  * Common interface for all agent loop implementations
  */
@@ -83,4 +89,4 @@ export interface IAgentLoop {
 /**
  * Extended configuration that includes callbacks
  */
-export interface FullAgentLoopConfig extends AgentLoopConfig, AgentLoopCallbacks {}
+export interface FullAgentLoopConfig extends AgentLoopConfig, AgentLoopCallbacks, AgentMcpTools {}

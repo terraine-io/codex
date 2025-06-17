@@ -2,7 +2,7 @@
  * Claude/Anthropic implementation of IAgentLoop
  */
 
-import type { IAgentLoop, AgentLoopCallbacks } from "./agent-loop-interface.js";
+import type { IAgentLoop, AgentLoopCallbacks, AgentMcpTools } from "./agent-loop-interface.js";
 import type { ResponseInputItem, ResponseItem } from "openai/resources/responses/responses.mjs";
 import type { ApprovalPolicy } from "../../approvals.js";
 import type { AppConfig } from "../config.js";
@@ -12,7 +12,8 @@ import {
   type ClaudeCreateMessageResponse,
   type ClaudeContent,
   type ClaudeToolUseContent,
-  type ClaudeToolResultContent
+  type ClaudeToolResultContent,
+  type ClaudeTool,
 } from "./claude-types.js";
 import { getClaudeTools, executeClaudeTool, type ClaudeToolContext, todoToolsInstructions } from "./claude-tools.js";
 import { applyPatchToolInstructions } from "./apply-patch.js";
@@ -44,6 +45,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
   private config: AppConfig;
   private additionalWritableRoots: ReadonlyArray<string>;
   private disableResponseStorage: boolean;
+  private mcpTools: Array<ClaudeTool>;
 
   // Anthropic client (will be dynamically imported)
   private anthropic: any = null;
@@ -71,7 +73,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
   // Claude-specific conversation state for proper message pairing
   private claudeMessages: Array<{ role: 'user' | 'assistant', content: any[] }> = [];
 
-  constructor(config: ClaudeAgentLoopConfig & AgentLoopCallbacks) {
+  constructor(config: ClaudeAgentLoopConfig & AgentLoopCallbacks & AgentMcpTools) {
     this.sessionId = randomUUID().replaceAll("-", "");
 
     this.model = config.model;
@@ -85,6 +87,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
     };
 
     this.additionalWritableRoots = config.additionalWritableRoots ?? [];
+    this.mcpTools = config.mcpTools ?? [];
 
     // Store callbacks
     this.onItem = config.onItem;
@@ -361,7 +364,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
       model: this.model,
       max_tokens: 4096,
       messages,
-      tools: getClaudeTools(),
+      tools: getClaudeTools().concat(this.mcpTools),
       stream: true,
       ...(systemInstructions ? { system: systemInstructions } : {})
     };

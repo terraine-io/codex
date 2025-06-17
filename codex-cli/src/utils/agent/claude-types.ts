@@ -67,6 +67,11 @@ export interface ClaudeTool {
     properties: Record<string, any>;
     required?: string[];
   };
+  inputSchema?: {
+    type: 'object';
+    properties: Record<string, any>;
+    required?: string[];
+  };
 }
 
 // Claude Streaming Types

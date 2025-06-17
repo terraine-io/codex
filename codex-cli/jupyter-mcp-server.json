@@ -1,0 +1,21 @@
+{
+  "command": "docker",
+  "args": [
+    "run",
+    "-i",
+    "--rm",
+    "-e",
+    "SERVER_URL",
+    "-e",
+    "TOKEN",
+    "-e",
+    "NOTEBOOK_PATH",
+    "--network=host",
+    "datalayer/jupyter-mcp-server:latest"
+  ],
+  "env": {
+    "SERVER_URL": "http://localhost:8888",
+    "TOKEN": "CMQlNiaA8jS1OYVqzrhVfVcdq7Nn1eJC",
+    "NOTEBOOK_PATH": "data_analysis_notebook.ipynb"
+  }
+}

@@ -47,6 +47,7 @@ export class AgentLoopFactory {
       onLoading: config.onLoading,
       getCommandConfirmation: config.getCommandConfirmation,
       onLastResponseId: config.onLastResponseId,
+      mcpTools: config.mcpTools,
     });
   }
   
