@@ -6,13 +6,12 @@ import { URL } from 'url';
 import { readFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'fs';
 import { join, resolve, extname } from 'path';
 import { AgentLoopFactory } from './src/utils/agent/index.js';
-import { type ClaudeTool } from './src/utils/agent/claude-types.js';
 import { config } from 'dotenv';
 import { initLogger, debug } from './src/utils/logger/log.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { RestHandlers } from './ws-rest-handlers.js';
-import { JupyterMcpWrapper } from './ws-mcp-cli.js';
+import { JupyterMcpWrapper } from './src/utils/agent/mcp-wrapper.js';
 import { SessionManager } from './ws-session-manager.js';
 
 
@@ -227,7 +226,7 @@ class WebSocketAgentServer {
   private connectorsStorePath: string | null = null;
   private uploadedFilesPath: string | null = null;
   private restHandlers: RestHandlers;
-  private jupyterMcpWrapper: JupyterMcpWrapper;
+  private jupyterMcpWrapper: JupyterMcpWrapper | null = null;
 
   constructor(port: number = 8080) {
     this.initialize(port);
@@ -256,12 +255,7 @@ class WebSocketAgentServer {
       verifyClient: (info) => this.verifyClient(info)
     });
 
-    let jupyterMcpTools: Array<ClaudeTool> = [];
-    if (process.env.ENABLE_JUPYTER_MCP_SERVER === 'true') {
-      jupyterMcpTools = await this.setupJupyterMcpServer();
-    }
-
-    await this.setupWebSocketServer(jupyterMcpTools);
+    await this.setupWebSocketServer();
 
     // Start the HTTP server
     this.httpServer.listen(port, () => {
@@ -652,21 +646,24 @@ class WebSocketAgentServer {
     }
   }
 
-  private async setupJupyterMcpServer(): Promise<Array<ClaudeTool>> {
+  private async setupJupyterMcpServer() {
     const configPath: string | undefined = process.env.JUPYTER_MCP_SERVER_CONFIG_JSON_PATH;
     if (!configPath) {
       throw new Error('Set JUPYTER_MCP_SERVER_CONFIG_JSON_PATH in env before launching.');
     }
     this.jupyterMcpWrapper = new JupyterMcpWrapper(configPath!);
-
     await this.jupyterMcpWrapper.initialize();
-    const tools = await this.jupyterMcpWrapper.retrieveTools();
-
-    return tools;
+    // Ignore return value for now -- this call is just to cache the tools.
+    await this.jupyterMcpWrapper.retrieveTools();
+    console.log('[ws-server::setupJupyterMcpServer] DONE')
   }
 
-  private setupWebSocketServer(jupyterTools: Array<ClaudeTool>) {
+  private async setupWebSocketServer() {
     console.log(`CODEX_UNSAFE_ALLOW_NO_SANDBOX=${process.env.CODEX_UNSAFE_ALLOW_NO_SANDBOX}`);
+    if (process.env.ENABLE_JUPYTER_MCP_SERVER === 'true') {
+      await this.setupJupyterMcpServer();
+    }
+  
     this.wss.on('connection', (ws, req) => {
       // Extract session ID from WebSocket path
       const sessionId = this.extractSessionIdFromPath(req.url || '');
@@ -679,7 +676,7 @@ class WebSocketAgentServer {
       console.log(`Client connected to session: ${sessionId}`);
 
       this.createTodosFile(sessionId);
-      this.sessions[sessionId] = new SessionManager(sessionId, ws, this.sessionStorePath!, jupyterTools);
+      this.sessions[sessionId] = new SessionManager(sessionId, ws, this.sessionStorePath!, this.jupyterMcpWrapper);
     });
   }
 

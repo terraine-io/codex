@@ -2,6 +2,7 @@
  * Claude/Anthropic implementation of IAgentLoop
  */
 
+import { Anthropic } from "@anthropic-ai/sdk"
 import type { IAgentLoop, AgentLoopCallbacks, AgentMcpTools } from "./agent-loop-interface.js";
 import type { ResponseInputItem, ResponseItem } from "openai/resources/responses/responses.mjs";
 import type { ApprovalPolicy } from "../../approvals.js";
@@ -20,6 +21,7 @@ import { applyPatchToolInstructions } from "./apply-patch.js";
 import { readChunkToolInstructions } from "./exec.js";
 import { randomUUID } from "crypto";
 import { log, debug, trace, isLevelEnabled, LogLevel } from "../logger/log.js";
+import { JupyterMcpWrapper } from './mcp-wrapper.js';
 
 /**
  * Configuration specific to Claude AgentLoop
@@ -45,10 +47,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
   private config: AppConfig;
   private additionalWritableRoots: ReadonlyArray<string>;
   private disableResponseStorage: boolean;
-  private mcpTools: Array<ClaudeTool>;
+  private mcpWrapper: JupyterMcpWrapper | null;
 
-  // Anthropic client (will be dynamically imported)
-  private anthropic: any = null;
+  private anthropic: Anthropic | null = null;
 
   // Callbacks
   private onItem: (item: ResponseItem) => void;
@@ -73,6 +74,8 @@ export class ClaudeAgentLoop implements IAgentLoop {
   // Claude-specific conversation state for proper message pairing
   private claudeMessages: Array<{ role: 'user' | 'assistant', content: any[] }> = [];
 
+  private mcpTools: Array<ClaudeTool> | null = null;
+
   constructor(config: ClaudeAgentLoopConfig & AgentLoopCallbacks & AgentMcpTools) {
     this.sessionId = randomUUID().replaceAll("-", "");
 
@@ -87,7 +90,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
     };
 
     this.additionalWritableRoots = config.additionalWritableRoots ?? [];
-    this.mcpTools = config.mcpTools ?? [];
+    this.mcpWrapper = config.mcpWrapper;
 
     // Store callbacks
     this.onItem = config.onItem;
@@ -100,13 +103,10 @@ export class ClaudeAgentLoop implements IAgentLoop {
   }
 
   /**
-   * Initialize Anthropic client with dynamic import
+   * Initialize Anthropic client.
    */
-  private async initializeAnthropicClient(): Promise<void> {
+  private initializeAnthropicClient() {
     try {
-      // Dynamic import to avoid requiring Anthropic SDK unless actually used
-      const { default: Anthropic } = await import('@anthropic-ai/sdk') as any;
-
       // Let Anthropic SDK handle API key automatically from environment
       // unless explicitly provided in config
       const clientConfig: any = {};
@@ -215,7 +215,18 @@ export class ClaudeAgentLoop implements IAgentLoop {
 
     // Ensure client is initialized
     if (!this.anthropic) {
-      await this.initializeAnthropicClient();
+      this.initializeAnthropicClient();
+    }
+
+    // Initialize MCP tools if not already done
+    if (!this.mcpTools) {
+      if (this.mcpWrapper) {
+        this.mcpTools = await this.mcpWrapper.retrieveTools();
+        console.log(`[claude-agent-loop] Loaded ${this.mcpTools.length} MCP tools`);
+      } else {
+        this.mcpTools = [];
+        console.log('[claude-agent-loop] No MCP wrapper configured');
+      }
     }
 
     const thisGeneration = ++this.generation;
@@ -364,7 +375,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
       model: this.model,
       max_tokens: 4096,
       messages,
-      tools: getClaudeTools().concat(this.mcpTools),
+      tools: getClaudeTools().concat(this.mcpTools ?? []),
       stream: true,
       ...(systemInstructions ? { system: systemInstructions } : {})
     };
@@ -379,6 +390,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
 
       try {
         // Make streaming request to Claude
+        if (!this.anthropic) {
+          throw new Error("Anthropic client not initialized");
+        }
         const stream = this.anthropic.messages.stream(request);
         this.currentStream = stream;
 
@@ -536,7 +550,13 @@ export class ClaudeAgentLoop implements IAgentLoop {
         abortSignal: this.execAbortController?.signal
       };
 
-      const result = await executeClaudeTool(toolUse, toolContext);
+      // Check if this is an MCP tool
+      const mcpToolNames = this.mcpTools?.map(t => t.name) ?? [];
+      const isMcpTool = mcpToolNames.includes(toolUse.name);
+
+      const result = isMcpTool && this.mcpWrapper 
+        ? await this.mcpWrapper.call(toolUse, toolContext)
+        : await executeClaudeTool(toolUse, toolContext);
 
       // Emit function call output
       this.emitResponseItem({

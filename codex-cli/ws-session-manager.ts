@@ -9,7 +9,7 @@ import { ContextManager, createContextManager, type ContextInfo } from './contex
 import { randomUUID } from 'crypto';
 import type { AppConfig } from './src/utils/config.js';
 import { type ClaudeTool } from './src/utils/agent/claude-types.js';
-
+import { JupyterMcpWrapper } from './src/utils/agent/mcp-wrapper.js';
 
 // Types for session management
 export interface SessionEvent {
@@ -41,10 +41,8 @@ interface ApprovalResponseMessage extends WSMessage {
 
 
 export class SessionManager {
-
     private currentSessionId: string;
     private sessionStorePath: string;
-
     private agentLoop: IAgentLoop;
     private ws: WebSocket;
     private contextManager: ContextManager;
@@ -54,8 +52,8 @@ export class SessionManager {
         command: Array<string>;
         applyPatch?: ApplyPatchCommand;
     } | null;
-    private mcpTools: Array<ClaudeTool> = [];
     private messageFragments: Map<string, ResponseItem[]> = new Map();
+    private jupyterMcpWrapper: JupyterMcpWrapper | null;
 
     // Fragment collection for turn-based message logging:
     // Collects streaming message fragments during a conversation turn and combines
@@ -65,10 +63,10 @@ export class SessionManager {
     // Note: lastResponseId is not needed when disableResponseStorage: true
 
 
-    constructor(sessionId: string, ws: WebSocket, sessionStorePath: string, mcpTools: Array<ClaudeTool>) {
+    constructor(sessionId: string, ws: WebSocket, sessionStorePath: string, jupyterMcpWrapper: JupyterMcpWrapper | null) {
         this.currentSessionId = sessionId;
         this.sessionStorePath = sessionStorePath;
-        this.mcpTools = mcpTools;
+        this.jupyterMcpWrapper = jupyterMcpWrapper;
 
         const sessionEvent: SessionEvent = {
             timestamp: new Date().toISOString(),
@@ -741,7 +739,7 @@ export class SessionManager {
                 }
             },
 
-            mcpTools: this.mcpTools,
+            mcpWrapper: this.jupyterMcpWrapper,
         });
 
         // If we have seed input (from compaction), run it to initialize the transcript

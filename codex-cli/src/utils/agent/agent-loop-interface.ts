@@ -1,7 +1,7 @@
 import type { ResponseInputItem } from "openai/resources/responses/responses.mjs";
 import type { ApprovalPolicy } from "../../approvals.js";
 import type { AppConfig } from "../config.js";
-import { type ClaudeTool } from './claude-types.js';
+import { JupyterMcpWrapper } from './mcp-wrapper.js';
 
 
 /**
@@ -51,7 +51,7 @@ export interface AgentLoopCallbacks {
 }
 
 export interface AgentMcpTools {
-  mcpTools: Array<ClaudeTool>;
+  mcpWrapper: JupyterMcpWrapper|null;
 }
 
 /**
