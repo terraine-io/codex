@@ -10,8 +10,6 @@ import type { AppConfig } from "../config.js";
 import {
   ClaudeFormatConverter,
   type ClaudeCreateMessageRequest,
-  type ClaudeCreateMessageResponse,
-  type ClaudeContent,
   type ClaudeToolUseContent,
   type ClaudeToolResultContent,
   type ClaudeTool,
@@ -75,6 +73,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
   private claudeMessages: Array<{ role: 'user' | 'assistant', content: any[] }> = [];
 
   private mcpTools: Array<ClaudeTool> | null = null;
+
+  // Promise-based tool execution tracking for immediate execution
+  private pendingToolResults = new Map<string, Promise<ClaudeToolResultContent | null>>();
 
   constructor(config: ClaudeAgentLoopConfig & AgentLoopCallbacks & AgentMcpTools) {
     this.sessionId = randomUUID().replaceAll("-", "");
@@ -386,7 +387,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
 
     return new Promise((resolve, reject) => {
       let responseId = `claude_${Date.now()}`;
-      let finalMessage: ClaudeCreateMessageResponse | null = null;
+      // finalMessage no longer needed since we execute tools immediately
 
       try {
         // Make streaming request to Claude
@@ -410,12 +411,12 @@ export class ClaudeAgentLoop implements IAgentLoop {
           });
         });
 
-        stream.on('contentBlock', (block: ClaudeContent) => {
+        stream.on('contentBlock', (block: any) => {
           if (this.canceled || thisGeneration !== this.generation) return;
 
-          // For tool_use blocks, just emit them as function calls
-          // We'll handle tool execution after the full message is received
+          // For tool_use blocks, emit function call AND execute immediately
           if (block.type === 'tool_use') {
+            // Emit function call immediately
             this.emitResponseItem({
               id: block.id,
               type: 'function_call',
@@ -423,10 +424,14 @@ export class ClaudeAgentLoop implements IAgentLoop {
               arguments: JSON.stringify(block.input),
               call_id: block.id
             });
+
+            // Start tool execution immediately but don't await - store promise
+            const toolPromise = this.executeToolImmediately(block, thisGeneration);
+            this.pendingToolResults.set(block.id, toolPromise);
           }
         });
 
-        stream.on('message', (message: ClaudeCreateMessageResponse) => {
+        stream.on('message', (message: any) => {
           if (this.canceled || thisGeneration !== this.generation) return;
 
           if (isLevelEnabled(LogLevel.TRACE)) {
@@ -434,7 +439,6 @@ export class ClaudeAgentLoop implements IAgentLoop {
           }
 
           responseId = message.id;
-          finalMessage = message;
           this.onLastResponseId(responseId);
 
           // Store response in Claude messages format for proper conversation flow
@@ -467,40 +471,33 @@ export class ClaudeAgentLoop implements IAgentLoop {
             return;
           }
 
-          // Process tool calls after the complete message is received
-          const toolResults: Array<ClaudeToolResultContent> = [];
+          // Wait for all pending tool executions to complete
+          let toolResults: Array<ClaudeToolResultContent> = [];
 
-          if (finalMessage) {
-            // Find all tool_use blocks in the message
-            const toolUseBlocks = finalMessage.content.filter(
-              (block): block is ClaudeToolUseContent => block.type === 'tool_use'
-            );
-
-            // Execute all tools sequentially to maintain proper order
-            for (const toolUse of toolUseBlocks) {
-              if (this.canceled || thisGeneration !== this.generation) break;
-
-              try {
-                const toolResult = await this.handleToolUseSync(toolUse);
-                if (toolResult) {
-                  toolResults.push(toolResult);
-                }
-              } catch (error) {
-                console.error(`Error executing tool ${toolUse.name}:`, error);
-                // Add error result to maintain tool_use/tool_result pairing
-                toolResults.push({
-                  type: 'tool_result',
-                  tool_use_id: toolUse.id,
-                  content: `Error: ${error instanceof Error ? error.message : String(error)}`,
-                  is_error: true
-                });
-              }
+          if (this.pendingToolResults.size > 0) {
+            try {
+              log(`ClaudeAgentLoop: Waiting for ${this.pendingToolResults.size} pending tool executions`);
+              
+              // Wait for all tools to complete using Promise.all
+              const promises = Array.from(this.pendingToolResults.values());
+              const results = await Promise.all(promises);
+              
+              // Filter out null results and collect valid ones
+              toolResults = results.filter((result): result is ClaudeToolResultContent => result !== null);
+              
+              log(`ClaudeAgentLoop: Collected ${toolResults.length} tool results from immediate execution`);
+            } catch (error) {
+              console.error('Error waiting for pending tool results:', error);
+              // Continue with empty results rather than failing completely
+            } finally {
+              // Clear pending results for next turn
+              this.pendingToolResults.clear();
             }
           }
 
           log(`ClaudeAgentLoop: Turn completed with ${toolResults.length} tool results`);
+          
           // If no tool results, we should stop loading immediately to show input prompt
-
           if (toolResults.length === 0) {
             this.onLoading(false);
           }
@@ -537,11 +534,19 @@ export class ClaudeAgentLoop implements IAgentLoop {
   }
 
   /**
-   * Handle tool use from Claude (synchronous version for multi-turn loop)
+   * Execute tool immediately when contentBlock is received
    */
-  private async handleToolUseSync(toolUse: ClaudeToolUseContent): Promise<ClaudeToolResultContent | null> {
+  private async executeToolImmediately(
+    toolUse: ClaudeToolUseContent, 
+    expectedGeneration: number
+  ): Promise<ClaudeToolResultContent | null> {
     try {
-      // Execute tool (function call item already emitted during streaming)
+      // Double-check generation and cancellation status
+      if (this.canceled || expectedGeneration !== this.generation) {
+        return null;
+      }
+
+      // Execute tool using existing logic
       const toolContext: ClaudeToolContext = {
         config: this.config,
         approvalPolicy: this.approvalPolicy,
@@ -558,7 +563,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
         ? await this.mcpWrapper.call(toolUse, toolContext)
         : await executeClaudeTool(toolUse, toolContext);
 
-      // Emit function call output
+      // Emit function call output immediately when ready
       this.emitResponseItem({
         id: `output_${toolUse.id}`,
         type: 'function_call_output',
@@ -566,11 +571,10 @@ export class ClaudeAgentLoop implements IAgentLoop {
         output: result.content || ''
       });
 
-      // Return result for continuation in multi-turn loop
       return result;
 
     } catch (error) {
-      console.error('Error handling tool use:', error);
+      console.error('Error executing tool immediately:', error);
 
       // Emit error output
       this.emitResponseItem({
@@ -589,6 +593,7 @@ export class ClaudeAgentLoop implements IAgentLoop {
       };
     }
   }
+
 
   /**
    * Emit response item with generation check
@@ -611,6 +616,9 @@ export class ClaudeAgentLoop implements IAgentLoop {
     if (this.currentStream && this.currentStream.abort) {
       this.currentStream.abort();
     }
+
+    // Clear pending tool results on cancellation
+    this.pendingToolResults.clear();
 
     this.generation += 1;
     log(`ClaudeAgentLoop.cancel(): generation bumped to ${this.generation}`);

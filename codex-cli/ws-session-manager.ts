@@ -648,7 +648,7 @@ export class SessionManager {
 
             // Callback for streaming response items back to client
             onItem: (item: ResponseItem) => {
-                // console.log(`📨 SERVER: Received response item type: ${item.type}, id: ${item.id}${item.type === 'local_shell_call' ? ` (command: ${(item as any).action?.command?.join(' ')})` : ''}`);
+                // console.log(`📨 SERVER: Received response item: ${JSON.stringify(item, null, 2)}`);
 
                 // Add to context manager first for tracking
                 this.contextManager?.addItem(item);
@@ -755,11 +755,53 @@ export class SessionManager {
         // If we have a resume transcript (from session resumption), initialize the transcript
         if (resumeTranscript && resumeTranscript.length > 0) {
             console.log(`🔄 Resuming session with ${resumeTranscript.length} items from previous conversation...`);
-            // Initialize the transcript without making API calls
+            
+            // Initialize the AgentLoop transcript without making API calls
             if (this.agentLoop.initializeTranscript) {
                 this.agentLoop.initializeTranscript(resumeTranscript);
             } else {
                 console.warn('⚠️  AgentLoop implementation does not support initializeTranscript - session resumption unavailable');
+            }
+            
+            // Also initialize the context manager with the historical data
+            // Convert ResponseInputItem[] to ResponseItem[] format for context manager
+            const contextTranscript: Array<ResponseItem> = resumeTranscript
+                .filter(item => item.type === 'message' || item.type === 'function_call' || item.type === 'function_call_output')
+                .map(item => {
+                    // Properly handle different item types to ensure all required fields are present
+                    const baseItem = {
+                        ...item,
+                        status: item.status || 'completed'
+                    };
+                    
+                    // For function_call_output items, ensure the output field is preserved
+                    if (item.type === 'function_call_output') {
+                        const funcCallOutput = item as ResponseInputItem.FunctionCallOutput;
+                        return {
+                            ...baseItem,
+                            // Ensure output field exists for token counting
+                            output: funcCallOutput.output || ''
+                        } as ResponseItem;
+                    }
+                    
+                    return baseItem as ResponseItem;
+                });
+            
+            // Also extract user input history for the context manager
+            const userInputHistory: Array<ResponseInputItem> = resumeTranscript
+                .filter(item => item.type === 'message' && item.role === 'user');
+            
+            if (contextTranscript.length > 0) {
+                console.log(`📊 Initializing context manager with ${contextTranscript.length} historical items and ${userInputHistory.length} user inputs`);
+                this.contextManager.setTranscript(contextTranscript);
+                
+                if (userInputHistory.length > 0) {
+                    this.contextManager.addUserInput(userInputHistory);
+                }
+                
+                // Log context info after resumption
+                const contextInfo = this.contextManager.getContextInfo();
+                console.log(`✅ Context resumed: ${contextInfo.tokenCount} tokens (${contextInfo.usagePercent.toFixed(1)}% usage)`);
             }
         }
     }
