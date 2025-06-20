@@ -495,12 +495,6 @@ You have access to purpose-built TODO management tools for tracking tasks effici
 - Keep task descriptions concise but informative
 - Use consistent status values for better organization
 
-### File Configuration
-- Location: .terraine/todos.json symlink in working directory (points to current session's todos file)
-- Session files stored as {session_id}.json in TODOS_STORE_PATH directory
-- Symlink automatically managed during session switching via REST API
-- JSON structure: {"items": [...]} with id, short_task_description, status, created_at, updated_at
-- Auto-creates directory structure and files if they don't exist
 `;
 
 /**
